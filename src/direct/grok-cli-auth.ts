@@ -10,7 +10,7 @@
  * CLI 的职责——它持有 `auth.json.lock`。token 过期时这里直接返回 undefined，交由
  * 上层回退，并提示用户在终端跑一次 `grok` 让 CLI 自己刷新。
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import * as path from "node:path";
 import { grokHomeDir } from "../cli-locator";
 
@@ -66,12 +66,20 @@ export function extractGrokCliToken(
 }
 
 /** 读 `~/.grok/auth.json`，返回 CLI 登录态里未过期的 access token（只读）；无则 undefined。 */
+let authFileCache: { mtimeMs: number; parsed: unknown } | undefined;
+
 export function readGrokCliToken(nowMs: number = Date.now()): string | undefined {
   try {
     const file = path.join(grokHomeDir(), "auth.json");
-    const raw = readFileSync(file, "utf8");
-    return extractGrokCliToken(JSON.parse(raw), nowMs);
+    // 按 mtime 缓存解析结果：CLI 刷新 auth.json 会改 mtime，缓存随即失效；
+    // 避免流式对话每轮取 token 都 read + JSON.parse。过期判断仍每次用 nowMs 做（便宜）。
+    const mtimeMs = statSync(file).mtimeMs;
+    if (!authFileCache || authFileCache.mtimeMs !== mtimeMs) {
+      authFileCache = { mtimeMs, parsed: JSON.parse(readFileSync(file, "utf8")) };
+    }
+    return extractGrokCliToken(authFileCache.parsed, nowMs);
   } catch {
+    authFileCache = undefined;
     return undefined;
   }
 }

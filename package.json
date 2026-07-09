@@ -134,6 +134,10 @@
         "command": "grokCoder.generateCommitMessage",
         "title": "%grokCoder.cmd.generateCommitMessage%",
         "icon": "$(sparkle)"
+      },
+      {
+        "command": "grokCoder.statusBarMenu",
+        "title": "Grok Coder: 状态栏菜单"
       }
     ],
     "languageModelChatProviders": [
@@ -191,6 +195,12 @@
       }
     ],
     "menus": {
+      "commandPalette": [
+        {
+          "command": "grokCoder.statusBarMenu",
+          "when": "false"
+        }
+      ],
       "editor/context": [
         {
           "command": "grok.sendSelection",

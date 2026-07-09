@@ -77,7 +77,7 @@ code --install-extension brucelee.grok-coder
 Or build from source:
 
 ```bash
-git clone https://github.com/hiliqi/grok-vscode.git
+git clone https://github.com/lxiaolong068/grok-vscode.git
 cd grok-vscode
 npm install
 ./scripts/install.sh        # Windows: pwsh scripts\install.ps1

@@ -101,8 +101,25 @@ export class XaiClient {
     let buffer = '';
 
     try {
+      const STALL_MS = 60_000;
       while (true) {
-        const { done, value } = await reader.read();
+        // stall 保护：网络挂起时 reader.read() 会永久等待，用计时器竞速中断
+        let stallTimer: ReturnType<typeof setTimeout> | undefined;
+        const stall = new Promise<never>((_, reject) => {
+          stallTimer = setTimeout(
+            () => reject(new XaiError('xAI 流响应超时（60 秒无数据），已中断。')),
+            STALL_MS
+          );
+        });
+        let chunk!: Awaited<ReturnType<typeof reader.read>>;
+        try {
+          chunk = await Promise.race([reader.read(), stall]);
+        } finally {
+          if (stallTimer) {
+            clearTimeout(stallTimer);
+          }
+        }
+        const { done, value } = chunk;
         if (done) {
           break;
         }
@@ -135,7 +152,12 @@ export class XaiClient {
         }
       }
     } finally {
-      reader.releaseLock();
+      // 超时中断时 read 可能仍 pending，releaseLock 会抛——吞掉以免掩盖真正的超时错误
+      try {
+        reader.releaseLock();
+      } catch {
+        /* pending read on stall timeout */
+      }
     }
 
     if (citations.size > 0) {

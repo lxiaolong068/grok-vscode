@@ -140,6 +140,34 @@ See `README.md § Install` for the full per-platform matrix.
 4. Worktree UI (`Grok: New Worktree Session`)
 5. Optional: auto-move view to secondary side bar on first activation (`workbench.action.moveView`)
 
+## Upstream sync (phuryn/grok-build-vscode)
+
+grok-coder is a **detached fork** of [phuryn/grok-build-vscode](https://github.com/phuryn/grok-build-vscode) (MIT): it was copied into its own history line and shares **no common ancestor** with upstream — the commits in this repo (`Release v0.3.1`, `Skip stale default model`, …) are our own, not upstream's. So `git merge upstream/main` would conflict wholesale; sync is **patch/cherry-pick based**, never merge. Divergence is concentrated and predictable:
+
+- **Additive, upstream-free — zero conflict:** everything under `src/direct/` (direct-API mode: BYOK provider, `@grok` participant, SCM commit, status bar, CLI-login reuse) + its tests. Upstream has none of it.
+- **Rebranded — always keep ours:** `package.json` identity, `README`/`CLAUDE.md` publish IDs, welcome byline, telemetry SDK name (`grok-coder`).
+- **Shared surface — real conflict risk:** the ACP side (`src/sidebar.ts`, `src/acp*.ts`, `src/session*.ts`, `src/plan*.ts`, …) and `media/chat.js`, where both sides edit.
+
+Upstream is at **1.4.30** (no new commits to sync as of 2026-07).
+
+**Sync procedure:**
+
+```bash
+git remote add upstream https://github.com/phuryn/grok-build-vscode.git   # one-time
+git fetch upstream
+git log --oneline <last-synced>..upstream/main                            # review what's new
+# Patch the shared paths only (src/direct/ never conflicts, so exclude it), 3-way so
+# conflicts surface as markers instead of failing the whole apply:
+git diff <last-synced>..upstream/main -- src/ media/ scripts/ \
+  | git apply --3way
+# — OR cherry-pick specific fixes when the range is small.
+```
+
+- `<last-synced>` = the upstream SHA/tag we last pulled from; **first sync** has none, so use the upstream tag this fork was based on (≈ `v1.4.30`) as the base.
+- **Resolve brand conflicts by keeping ours** (publisher / name / URLs / byline / telemetry SDK).
+- **After every sync (non-negotiable):** `tsc -p . --noEmit` clean + `npm test` at the **677-test floor** + `npm run test:live` — the ACP wire format is what drifts with upstream, so live is the thing most likely to break.
+- **Record the synced-to upstream SHA** in the CHANGELOG entry so the next `git diff` has a base.
+
 ## Publishing
 
 **Release procedure — ALWAYS tag + create a GitHub Release (with the `.vsix` attached) on a release push to `main`** (standing convention; mirrors the `v1.0.0…` tag history + GitHub Releases):
