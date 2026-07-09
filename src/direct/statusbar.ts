@@ -4,7 +4,16 @@ import * as vscode from "vscode";
  * 状态栏指示器（上游 roadmap 未实现项）：显示 Grok Build 当前默认模型与推理强度，
  * 点击弹出快捷菜单（打开侧边栏 / 选模型 / 管理直连账号）。
  */
-export function createStatusBar(context: vscode.ExtensionContext): vscode.Disposable {
+/** 状态栏的数据源（由 GrokSidebar 结构化实现）：实时 model + 变化通知。 */
+export interface StatusSource {
+  readonly onDidChangeStatus: vscode.Event<void>;
+  getStatusModel(): string | undefined;
+}
+
+export function createStatusBar(
+  context: vscode.ExtensionContext,
+  statusSource?: StatusSource
+): vscode.Disposable {
   const item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 90);
   item.command = "grokCoder.statusBarMenu";
 
@@ -17,7 +26,8 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
       item.hide();
       return;
     }
-    const model = cfg.get<string>("defaultModel") || "grok-build";
+    // 优先聚焦会话的实时 model（会话内切换会反映到这里），无则回退配置默认
+    const model = statusSource?.getStatusModel() || cfg.get<string>("defaultModel") || "grok-build";
     const effort = cfg.get<string>("defaultEffort") || "default";
     item.text = `$(rocket) ${shortModel(model)} · ${effort}`;
     item.tooltip = new vscode.MarkdownString(
@@ -54,8 +64,13 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
     }
   });
 
+  const statusListener = statusSource?.onDidChangeStatus(update);
+
   update();
   context.subscriptions.push(item, menuCommand, cfgListener);
+  if (statusListener) {
+    context.subscriptions.push(statusListener);
+  }
   return item;
 }
 

@@ -13,9 +13,12 @@ import { clearApiKey, promptForApiKey } from "./config";
 import * as oauth from "./oauth";
 import { isLoggedIn } from "./auth";
 import { generateCommitMessage } from "./commit";
-import { createStatusBar } from "./statusbar";
+import { createStatusBar, StatusSource } from "./statusbar";
 
-export function activateDirect(context: vscode.ExtensionContext): void {
+export function activateDirect(
+  context: vscode.ExtensionContext,
+  statusSource?: StatusSource
+): void {
   const provider = new GrokChatProvider(context.secrets);
 
   // BYOK provider 与 @grok 参与者依赖 Copilot Chat 体系的 vscode.lm / vscode.chat；
@@ -39,7 +42,7 @@ export function activateDirect(context: vscode.ExtensionContext): void {
   }
 
   context.subscriptions.push(
-    createStatusBar(context),
+    createStatusBar(context, statusSource),
 
     vscode.commands.registerCommand("grokCoder.login", async () => {
       try {

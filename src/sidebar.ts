@@ -213,6 +213,9 @@ export class GrokSidebar implements vscode.WebviewViewProvider {
   // message = one clean utterance) without re-resolving the mic device.
   private voiceStreamCtx?: { key: string; ffmpegPath: string; device?: string; phrase: string; keyterms: string[] };
   private configWatcher?: vscode.Disposable;
+  private readonly statusEmitter = new vscode.EventEmitter<void>();
+  /** 聚焦会话的实时 model 变化时触发——状态栏订阅。 */
+  readonly onDidChangeStatus = this.statusEmitter.event;
   private cliPath?: string;
   // Guards the silent grok-CLI auto-update so it runs at most once per activation.
   private cliUpdateChecked = false;
@@ -884,11 +887,17 @@ See design doc for the full state machine diagram.`;
     this.post({ type: "onboarding", state: "auth-required" });
   }
 
+  /** 聚焦会话当前使用的 model（状态栏用；无则回退配置默认）。 */
+  getStatusModel(): string | undefined {
+    return this.focused.client?.currentModelId;
+  }
+
   dispose(): void {
     if (this.reaper) { clearInterval(this.reaper); this.reaper = undefined; }
     void this.disposePool();
     this.editorWatcher?.dispose();
     this.configWatcher?.dispose();
+    this.statusEmitter.dispose();
     this.terminalManager.disposeAll();
     this.voiceRecorder.cancel();
     this.voiceStreamer?.cancel();
@@ -1354,6 +1363,7 @@ See design doc for the full state machine diagram.`;
     client.on("modelChanged", (id) => {
       if (gen !== session.gen) return;
       this.emit(session, { type: "modelChanged", modelId: id });
+      this.statusEmitter.fire();
     });
     client.on("modeChanged", (id) => {
       if (gen !== session.gen) return;

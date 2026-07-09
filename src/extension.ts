@@ -7,7 +7,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const sidebar = new GrokSidebar(context, output);
 
   // Grok Coder 直连模块（BYOK provider / @grok 参与者 / SCM 提交信息 / 状态栏）
-  activateDirect(context);
+  activateDirect(context, sidebar);
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(GrokSidebar.viewId, sidebar, {
