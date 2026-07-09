@@ -1,0 +1,410 @@
+{
+  "name": "grok-coder",
+  "displayName": "Grok Coder",
+  "description": "Grok Build sidebar + Grok 4.5 in the native Chat model picker, with Chinese UI, status-bar indicator, and one-click commit messages. Based on grok-build-vscode by Paweł Huryn (MIT). Requires the Grok Build CLI with a SuperGrok / X Premium+ subscription, or an xAI account / API key. Not affiliated with xAI.",
+  "version": "0.3.1",
+  "publisher": "brucelee",
+  "author": {
+    "name": "brucelee"
+  },
+  "contributors": [
+    {
+      "name": "Paweł Huryn (grok-build-vscode upstream)",
+      "url": "https://github.com/phuryn/grok-build-vscode"
+    }
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/lxiaolong068/grok-vscode",
+  "bugs": {
+    "url": "https://github.com/lxiaolong068/grok-vscode/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lxiaolong068/grok-vscode"
+  },
+  "engines": {
+    "vscode": "^1.104.0"
+  },
+  "categories": [
+    "AI",
+    "Chat"
+  ],
+  "keywords": [
+    "grok",
+    "grok-build",
+    "xai",
+    "xai-grok",
+    "acp",
+    "acp-client",
+    "agent-client-protocol",
+    "agent",
+    "ai",
+    "chat",
+    "thinking",
+    "tool-calls",
+    "sidebar"
+  ],
+  "icon": "resources/grok-icon.png",
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "grokSidebar",
+          "title": "Grok",
+          "icon": "resources/grok-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "grokSidebar": [
+        {
+          "type": "webview",
+          "id": "grok.chat",
+          "name": "Grok"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "grok.open",
+        "title": "%grok.cmd.open%"
+      },
+      {
+        "command": "grok.newSession",
+        "title": "%grok.cmd.newSession%"
+      },
+      {
+        "command": "grok.compact",
+        "title": "%grok.cmd.compact%"
+      },
+      {
+        "command": "grok.pickModel",
+        "title": "%grok.cmd.pickModel%"
+      },
+      {
+        "command": "grok.toggleMode",
+        "title": "%grok.cmd.toggleMode%"
+      },
+      {
+        "command": "grok.sendSelection",
+        "title": "%grok.cmd.sendSelection%"
+      },
+      {
+        "command": "grok.sendFile",
+        "title": "%grok.cmd.sendFile%"
+      },
+      {
+        "command": "grok.insertAtMention",
+        "title": "%grok.cmd.insertAtMention%"
+      },
+      {
+        "command": "grok.showLogs",
+        "title": "%grok.cmd.showLogs%"
+      },
+      {
+        "command": "grok.logout",
+        "title": "%grok.cmd.logout%"
+      },
+      {
+        "command": "grok._debugDummyPlan",
+        "title": "Grok: Debug — Show dummy plan card (for testing Approve/Reject/Cancel)"
+      },
+      {
+        "command": "grokCoder.login",
+        "title": "%grokCoder.cmd.login%"
+      },
+      {
+        "command": "grokCoder.logout",
+        "title": "%grokCoder.cmd.logout%"
+      },
+      {
+        "command": "grokCoder.manage",
+        "title": "%grokCoder.cmd.manage%"
+      },
+      {
+        "command": "grokCoder.setApiKey",
+        "title": "%grokCoder.cmd.setApiKey%"
+      },
+      {
+        "command": "grokCoder.clearApiKey",
+        "title": "%grokCoder.cmd.clearApiKey%"
+      },
+      {
+        "command": "grokCoder.generateCommitMessage",
+        "title": "%grokCoder.cmd.generateCommitMessage%",
+        "icon": "$(sparkle)"
+      }
+    ],
+    "languageModelChatProviders": [
+      {
+        "vendor": "xai-grok",
+        "displayName": "xAI Grok",
+        "managementCommand": "grokCoder.manage"
+      }
+    ],
+    "chatParticipants": [
+      {
+        "id": "grok-coder.grok",
+        "name": "grok",
+        "fullName": "Grok Coder",
+        "description": "%grokCoder.participant.description%",
+        "isSticky": true,
+        "commands": [
+          {
+            "name": "fix",
+            "description": "%grokCoder.slash.fix%"
+          },
+          {
+            "name": "explain",
+            "description": "%grokCoder.slash.explain%"
+          },
+          {
+            "name": "review",
+            "description": "%grokCoder.slash.review%"
+          },
+          {
+            "name": "docs",
+            "description": "%grokCoder.slash.docs%"
+          },
+          {
+            "name": "search",
+            "description": "%grokCoder.slash.search%"
+          },
+          {
+            "name": "commit",
+            "description": "%grokCoder.slash.commit%"
+          }
+        ]
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "grok.open",
+        "key": "ctrl+;",
+        "mac": "cmd+;"
+      },
+      {
+        "command": "grok.insertAtMention",
+        "key": "alt+g",
+        "when": "editorTextFocus"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "grok.sendSelection",
+          "when": "editorHasSelection",
+          "group": "grok@1"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "grok.sendFile",
+          "when": "resourceScheme == file",
+          "group": "grok@1"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "grok.sendFile",
+          "when": "resourceScheme == file",
+          "group": "grok@1"
+        }
+      ],
+      "scm/title": [
+        {
+          "command": "grokCoder.generateCommitMessage",
+          "when": "scmProvider == git",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Grok",
+      "properties": {
+        "grok.cliPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the grok binary. Empty = auto-discover (~/.grok/bin/grok, then PATH)."
+        },
+        "grok.defaultModel": {
+          "type": "string",
+          "default": "",
+          "description": "Model ID to use on new sessions. Empty = CLI default."
+        },
+        "grok.defaultMode": {
+          "type": "string",
+          "enum": [
+            "",
+            "agent",
+            "yolo"
+          ],
+          "enumDescriptions": [
+            "Agent mode (CLI default)",
+            "Agent mode",
+            "Auto accept — auto-approve every permission request"
+          ],
+          "default": "",
+          "description": "Mode for new sessions. Updated automatically to remember your last switch between Agent and Auto accept (Plan is never remembered). Empty = Agent."
+        },
+        "grok.includeActiveFileByDefault": {
+          "type": "boolean",
+          "default": true,
+          "description": "Auto-add the active editor file as a context chip."
+        },
+        "grok.defaultEffort": {
+          "type": "string",
+          "enum": [
+            "",
+            "none",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "enumDescriptions": [
+            "CLI default (no flag passed to grok agent stdio)",
+            "None",
+            "Minimal",
+            "Low — faster, lighter reasoning",
+            "Medium",
+            "High",
+            "XHigh — deepest reasoning, slowest"
+          ],
+          "default": "",
+          "description": "Reasoning effort passed as --reasoning-effort to grok agent stdio. Values match the grok CLI's accepted set (none, minimal, low, medium, high, xhigh). Changing this restarts the session."
+        },
+        "grok.useCtrlEnterToSend": {
+          "type": "boolean",
+          "default": false,
+          "description": "Use Ctrl/Cmd+Enter to send (Enter inserts newline)."
+        },
+        "grok.showThinking": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Show Grok's reasoning (thinking) traces in chat. Off by default — a lightweight \"Thinking…\" indicator stands in while Grok reasons. Also toggleable live from the gear menu → **Config & debug → Show thinking traces** (applies to already-loaded sessions too)."
+        },
+        "grok.telemetry.enabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Send anonymous, privacy-first usage telemetry. A single `session_start` event per session carries only an anonymous install id (a random GUID, no account/identity) plus the chosen mode/model/effort — **never** any message content, code, or file paths. Also requires VS Code's global `telemetry.telemetryLevel` to be enabled; turning either off stops all sending."
+        },
+        "grok.chatFontScale": {
+          "type": "number",
+          "default": 100,
+          "minimum": 60,
+          "maximum": 300,
+          "markdownDescription": "Zoom for the Grok chat panel only, as a percent (100 = default). Scales the whole chat UI — text, icons, spacing — without affecting the rest of VS Code (unlike `Ctrl/Cmd+Shift+=`). Applies live, no reload needed. Supports User (global) and Workspace (local) scope."
+        },
+        "grok.voiceApiKey": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "xAI API key for voice control (Speech-to-Text via `api.x.ai/v1/stt`). This is a **separate** developer key from [console.x.ai](https://console.x.ai) — it is billed pay-as-you-go and is unrelated to the Grok CLI login. Leave empty to fall back to `GROK_VOICE_API_KEY` or `XAI_API_KEY` in your workspace `.env`."
+        },
+        "grok.ffmpegPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the ffmpeg binary used to record the microphone for voice control. Empty = use 'ffmpeg' from PATH. Install ffmpeg from https://ffmpeg.org if voice control reports it as missing."
+        },
+        "grok.voiceInputDevice": {
+          "type": "string",
+          "default": "",
+          "description": "Microphone device for voice control. Empty = system default (on Windows, the first DirectShow audio device is auto-detected). Set this to a specific device name (Windows/dshow) or index (macOS/avfoundation) to override."
+        },
+        "grok.voiceSendPhrase": {
+          "type": "string",
+          "default": "grok send",
+          "description": "Spoken phrase that auto-submits the message when it ends a voice transcription (e.g. say \"…fix the bug, grok send\"). The phrase is stripped before sending. Leave empty to disable hands-free sending."
+        },
+        "grok.voiceStreaming": {
+          "type": "boolean",
+          "default": true,
+          "description": "Stream voice transcription live as you speak (words appear in the composer in real time, and \"grok send\" can submit without a second click). Disable to use one-shot batch mode (click to start, click to stop, then transcribe). Streaming costs $0.20/hr of audio vs $0.10/hr batch."
+        },
+        "grokCoder.baseUrl": {
+          "type": "string",
+          "default": "https://api.x.ai/v1",
+          "description": "%grokCoder.cfg.baseUrl%"
+        },
+        "grokCoder.model": {
+          "type": "string",
+          "default": "grok-4.5",
+          "description": "%grokCoder.cfg.model%"
+        },
+        "grokCoder.reasoningEffort": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "default": "low",
+          "description": "%grokCoder.cfg.reasoningEffort%"
+        },
+        "grokCoder.enableLiveSearch": {
+          "type": "boolean",
+          "default": true,
+          "description": "%grokCoder.cfg.enableLiveSearch%"
+        },
+        "grokCoder.oauthClientId": {
+          "type": "string",
+          "default": "",
+          "description": "%grokCoder.cfg.oauthClientId%"
+        },
+        "grokCoder.statusBar.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "%grokCoder.cfg.statusBar%"
+        },
+        "grokCoder.additionalModels": {
+          "type": "array",
+          "default": [],
+          "description": "%grokCoder.cfg.additionalModels%",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "contextWindow": {
+                "type": "number"
+              },
+              "maxOutputTokens": {
+                "type": "number"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "tsc -p .",
+    "compile": "tsc -p .",
+    "watch": "tsc -p . -w",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:perf": "vitest run --config vitest.perf.config.ts",
+    "test:live": "tsc -p . && node scripts/live-tests.cjs",
+    "telemetry:probe": "tsc -p . && node scripts/telemetry-probe.cjs",
+    "prepackage": "node -e \"for (const f of require('fs').readdirSync('.')) if (f.endsWith('.vsix')) require('fs').unlinkSync(f)\"",
+    "package": "npx @vscode/vsce package",
+    "publish": "npx @vscode/vsce publish"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.104.0",
+    "@types/ws": "^8.18.1",
+    "happy-dom": "^20.9.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  },
+  "dependencies": {
+    "ws": "^8.21.0"
+  }
+}
