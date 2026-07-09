@@ -34,6 +34,34 @@ describe("AcpClient.request timer lifecycle", () => {
   });
 });
 
+describe("AcpClient default model startup", () => {
+  it("skips a stale default model that is not in the CLI's available model list", async () => {
+    const { client, written } = clientWithFakeProc();
+
+    const p = client.newSession("grok-build");
+    expect(JSON.parse(written[0])).toMatchObject({
+      id: 1,
+      method: "session/new",
+    });
+
+    (client as any).onLine(JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      result: {
+        sessionId: "s1",
+        models: {
+          currentModelId: "grok-4.5",
+          availableModels: [{ modelId: "grok-4.5", name: "Grok 4.5" }],
+        },
+      },
+    }));
+
+    await p;
+    expect(written).toHaveLength(1);
+    expect(client.currentModelId).toBe("grok-4.5");
+  });
+});
+
 // #3/#4 (thanks @shugav for the crash report): the startup crash was the bogus
 // `max` value, not reasoningEffort itself — grok accepts none|minimal|low|medium|
 // high|xhigh, and the flag must precede the `stdio` subcommand.

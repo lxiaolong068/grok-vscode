@@ -235,7 +235,7 @@ export class AcpClient extends EventEmitter {
     this.currentModelId = resolveModelId(res.models?.currentModelId, this.availableModels);
     this.emit("session", res);
 
-    if (modelId && modelId !== this.currentModelId) {
+    if (this.shouldApplyModel(modelId)) {
       await this.setModel(modelId);
     }
     return { sessionId: res.sessionId };
@@ -260,7 +260,7 @@ export class AcpClient extends EventEmitter {
       resolveModelId(res?.models?.currentModelId, this.availableModels) ?? this.currentModelId;
     this.emit("session", { sessionId, ...(res ?? {}) });
     this.emit("sessionLoaded", { sessionId });
-    if (modelId && modelId !== this.currentModelId) {
+    if (this.shouldApplyModel(modelId)) {
       await this.setModel(modelId);
     }
     return { sessionId };
@@ -286,6 +286,17 @@ export class AcpClient extends EventEmitter {
         : (resolveModelId(ok, this.availableModels) ?? ok);
       this.emit("modelChanged", this.currentModelId);
     }
+  }
+
+  private shouldApplyModel(modelId: string | undefined): modelId is string {
+    if (!modelId || modelId === this.currentModelId) return false;
+    if (this.availableModels.length === 0) return true;
+    const resolved = resolveModelId(modelId, this.availableModels);
+    if (resolved && this.availableModels.some((m) => m.modelId === resolved)) return true;
+    this.opts.log(
+      `Skipping unavailable default model '${modelId}'; keeping '${this.currentModelId ?? "CLI default"}'.`,
+    );
+    return false;
   }
 
   async setMode(modeId: string): Promise<void> {
