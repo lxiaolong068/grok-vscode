@@ -68,6 +68,19 @@ export function activateDirect(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("grokCoder.generateCommitMessage", () =>
       generateCommitMessage(context.secrets)
     ),
+    vscode.commands.registerCommand(
+      "grokCoder.applyFix",
+      async (arg: { uri: string; range: [number, number, number, number]; code: string }) => {
+        const [sl, sc, el, ec] = arg.range;
+        const edit = new vscode.WorkspaceEdit();
+        edit.replace(vscode.Uri.parse(arg.uri), new vscode.Range(sl, sc, el, ec), arg.code);
+        const ok = await vscode.workspace.applyEdit(edit);
+        vscode.window.setStatusBarMessage(
+          ok ? "Grok Coder：已应用修复 ✓" : "Grok Coder：应用修复失败",
+          3000
+        );
+      }
+    ),
     vscode.commands.registerCommand("grokCoder.manage", async () => {
       const loggedIn = await isLoggedIn(context.secrets);
       const items: (vscode.QuickPickItem & { id: string })[] = [

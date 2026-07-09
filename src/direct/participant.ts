@@ -5,6 +5,7 @@ import { getConfig } from './config';
 import { ensureAuth } from './auth';
 import { XaiInputItem, XaiRequestOptions, textMessage, supportsReasoningEffort } from './xaiClient';
 import { streamWithAuthFallback } from './authed-stream';
+import { extractFirstCodeBlock } from './text-utils';
 
 const execFileAsync = promisify(execFile);
 
@@ -39,6 +40,25 @@ export function createGrokParticipant(
     }
     const cfg = getConfig();
     const command = request.command;
+
+    let assistantText = '';
+    // /fix：记住目标编辑区（选中区或整篇），供完成后“应用到编辑器”
+    let fixTarget: { uri: string; range: [number, number, number, number] } | undefined;
+    if (command === 'fix') {
+      const editor = vscode.window.activeTextEditor;
+      if (editor) {
+        const doc = editor.document;
+        const sel = editor.selection;
+        const raw = sel.isEmpty
+          ? new vscode.Range(0, 0, doc.lineCount, 0)
+          : new vscode.Range(sel.start, sel.end);
+        const r = doc.validateRange(raw);
+        fixTarget = {
+          uri: doc.uri.toString(),
+          range: [r.start.line, r.start.character, r.end.line, r.end.character]
+        };
+      }
+    }
 
     // 会话历史（同参与者）
     const input: XaiInputItem[] = [];
@@ -80,6 +100,9 @@ export function createGrokParticipant(
       // xAI 服务端搜索工具（OAuth 订阅或 API Key 均可用）
       options.tools = [{ type: 'web_search' }, { type: 'x_search' }];
       stream.progress('正在实时搜索 Web/X…');
+    } else if (!command && cfg.autoSearch) {
+      // 普通对话：开启 autoSearch 时挂上服务端搜索工具，由模型自行决定是否搜索
+      options.tools = [{ type: 'web_search' }, { type: 'x_search' }];
     }
 
     const abort = new AbortController();
@@ -90,9 +113,22 @@ export function createGrokParticipant(
           break;
         }
         if (ev.type === 'text') {
+          assistantText += ev.text;
           stream.markdown(ev.text);
         } else if (ev.type === 'citations') {
           stream.markdown('\n\n**来源：**\n' + ev.urls.map((u) => `- ${u}`).join('\n'));
+        }
+      }
+
+      // /fix 完成：把首个代码块经 WorkspaceEdit 一键写回目标区
+      if (command === 'fix' && fixTarget) {
+        const code = extractFirstCodeBlock(assistantText);
+        if (code) {
+          stream.button({
+            command: 'grokCoder.applyFix',
+            title: '应用到编辑器',
+            arguments: [{ uri: fixTarget.uri, range: fixTarget.range, code }]
+          });
         }
       }
     } catch (e) {

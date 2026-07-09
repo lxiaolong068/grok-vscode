@@ -26,6 +26,7 @@
   "grokCoder.cfg.model": "Model used by the @grok chat participant and commit generation.",
   "grokCoder.cfg.reasoningEffort": "Reasoning effort for direct-API calls (low is recommended for coding Q&A).",
   "grokCoder.cfg.enableLiveSearch": "Allow /search to use xAI server-side Web/X live search (billed as xAI tools).",
+  "grokCoder.cfg.autoSearch": "Also attach xAI Web/X search tools to regular @grok chats — the model decides whether to search (billed as xAI tools).",
   "grokCoder.cfg.oauthClientId": "Override the default xAI OAuth client ID (rarely needed).",
   "grokCoder.cfg.statusBar": "Show the Grok status bar item (current model / reasoning effort).",
   "grokCoder.cfg.additionalModels": "Extra models to register in the native Chat model picker, e.g. [{\"id\":\"grok-code-fast-1\",\"name\":\"Grok Code Fast\",\"contextWindow\":256000,\"maxOutputTokens\":16384}]."

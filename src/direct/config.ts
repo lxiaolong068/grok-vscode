@@ -9,6 +9,7 @@ export function getConfig() {
     model: cfg.get<string>('model') ?? 'grok-4.5',
     reasoningEffort: cfg.get<'low' | 'medium' | 'high'>('reasoningEffort') ?? 'low',
     enableLiveSearch: cfg.get<boolean>('enableLiveSearch') ?? true,
+    autoSearch: cfg.get<boolean>('autoSearch') ?? false,
     additionalModels:
       cfg.get<{ id: string; name?: string; contextWindow?: number; maxOutputTokens?: number }[]>(
         'additionalModels'

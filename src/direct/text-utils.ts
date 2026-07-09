@@ -8,3 +8,12 @@ export function stripFences(s: string): string {
     .replace(/\n?```$/, '')
     .trim();
 }
+
+/** 提取 Markdown 中第一个围栏代码块的内容；无围栏则 undefined。 */
+export function extractFirstCodeBlock(markdown: string): string | undefined {
+  const m = markdown.match(/```[^\n]*\n([\s\S]*?)```/);
+  if (!m) {
+    return undefined;
+  }
+  return m[1].replace(/\n+$/, '');
+}

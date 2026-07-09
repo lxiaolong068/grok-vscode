@@ -138,6 +138,10 @@
       {
         "command": "grokCoder.statusBarMenu",
         "title": "Grok Coder: 状态栏菜单"
+      },
+      {
+        "command": "grokCoder.applyFix",
+        "title": "Grok Coder: 应用修复到编辑器"
       }
     ],
     "languageModelChatProviders": [
@@ -198,6 +202,10 @@
       "commandPalette": [
         {
           "command": "grokCoder.statusBarMenu",
+          "when": "false"
+        },
+        {
+          "command": "grokCoder.applyFix",
           "when": "false"
         }
       ],
@@ -357,6 +365,11 @@
           "type": "boolean",
           "default": true,
           "description": "%grokCoder.cfg.enableLiveSearch%"
+        },
+        "grokCoder.autoSearch": {
+          "type": "boolean",
+          "default": false,
+          "description": "%grokCoder.cfg.autoSearch%"
         },
         "grokCoder.oauthClientId": {
           "type": "string",

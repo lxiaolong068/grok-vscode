@@ -26,6 +26,7 @@
   "grokCoder.cfg.model": "@grok 参与者与提交信息生成使用的模型。",
   "grokCoder.cfg.reasoningEffort": "直连 API 的推理强度（日常编码问答建议 low）。",
   "grokCoder.cfg.enableLiveSearch": "允许 /search 使用 xAI 服务端 Web/X 实时搜索（按 xAI 工具计费）。",
+  "grokCoder.cfg.autoSearch": "普通 @grok 对话也挂上 xAI Web/X 搜索工具，由模型自行决定是否搜索（按 xAI 工具计费）。",
   "grokCoder.cfg.oauthClientId": "覆盖默认的 xAI OAuth Client ID（一般无需修改）。",
   "grokCoder.cfg.statusBar": "在状态栏显示 Grok 指示器（当前模型/推理强度）。",
   "grokCoder.cfg.additionalModels": "注册到原生 Chat 模型选择器的额外模型，如 [{\"id\":\"grok-code-fast-1\",\"name\":\"Grok Code Fast\",\"contextWindow\":256000,\"maxOutputTokens\":16384}]。"
