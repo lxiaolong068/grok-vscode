@@ -3,7 +3,13 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { getConfig } from './config';
 import { ensureAuth } from './auth';
-import { XaiInputItem, XaiRequestOptions, textMessage, supportsReasoningEffort } from './xaiClient';
+import {
+  XaiInputItem,
+  XaiRequestOptions,
+  textMessage,
+  supportsReasoningEffort,
+  promptCacheKey
+} from './xaiClient';
 import { streamWithAuthFallback } from './authed-stream';
 import { extractFirstCodeBlock } from './text-utils';
 
@@ -92,6 +98,7 @@ export function createGrokParticipant(
       input,
       reasoning: supportsReasoningEffort(cfg.model) ? { effort: cfg.reasoningEffort } : undefined
     };
+    options.cacheKey = promptCacheKey(options.instructions, input);
     if (command === 'search') {
       if (!cfg.enableLiveSearch) {
         stream.markdown('实时搜索已在设置中关闭（`grokCoder.enableLiveSearch`）。');

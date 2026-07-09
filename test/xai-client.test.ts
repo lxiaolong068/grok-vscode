@@ -4,6 +4,7 @@ import {
   parseSseData,
   sanitizeInput,
   isAuthFallbackError,
+  promptCacheKey,
   XaiError,
   XaiInputItem
 } from "../src/direct/xaiClient";
@@ -115,6 +116,34 @@ describe("sanitizeInput", () => {
       { type: "function_call_output", call_id: "c1", output: "ok" }
     ];
     expect(sanitizeInput(input)).toHaveLength(2);
+  });
+});
+
+describe("promptCacheKey", () => {
+  const u = (text: string): XaiInputItem => ({ role: "user", content: [{ type: "input_text", text }] });
+  const a = (text: string): XaiInputItem => ({ role: "assistant", content: [{ type: "output_text", text }] });
+
+  it("同 instructions + 同首条用户消息 → 同 key", () => {
+    expect(promptCacheKey("sys", [u("hello")])).toBe(promptCacheKey("sys", [u("hello")]));
+  });
+
+  it("跨轮稳定：追加后续消息、首条不变 → 同 key", () => {
+    const round1 = promptCacheKey("sys", [u("hello")]);
+    const round2 = promptCacheKey("sys", [u("hello"), a("hi there"), u("follow up")]);
+    expect(round2).toBe(round1);
+  });
+
+  it("不同首条用户消息 → 不同 key", () => {
+    expect(promptCacheKey("sys", [u("hello")])).not.toBe(promptCacheKey("sys", [u("goodbye")]));
+  });
+
+  it("不同 instructions → 不同 key", () => {
+    expect(promptCacheKey("sysA", [u("hello")])).not.toBe(promptCacheKey("sysB", [u("hello")]));
+  });
+
+  it("固定前缀，且不受空 instructions 影响而崩溃", () => {
+    expect(promptCacheKey(undefined, [u("x")])).toMatch(/^grok-coder-/);
+    expect(promptCacheKey(undefined, [])).toMatch(/^grok-coder-/);
   });
 });
 

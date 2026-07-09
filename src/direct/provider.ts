@@ -6,7 +6,8 @@ import {
   XaiContentPart,
   XaiInputItem,
   XaiTool,
-  supportsReasoningEffort
+  supportsReasoningEffort,
+  promptCacheKey
 } from './xaiClient';
 
 const GROK_45_CONTEXT = 500_000;
@@ -102,7 +103,8 @@ export class GrokChatProvider implements vscode.LanguageModelChatProvider {
           max_output_tokens: numberOrUndefined(modelOptions['max_tokens']),
           reasoning: supportsReasoningEffort(model.id)
             ? { effort: cfg.reasoningEffort }
-            : undefined
+            : undefined,
+          cacheKey: promptCacheKey(instructions, input)
         },
         abort.signal
       );

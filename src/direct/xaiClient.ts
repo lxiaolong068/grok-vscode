@@ -34,6 +34,8 @@ export interface XaiRequestOptions {
   temperature?: number;
   max_output_tokens?: number;
   reasoning?: { effort: 'low' | 'medium' | 'high' };
+  /** 缓存路由提示（作为 x-grok-conv-id header 发送，不进请求 body）。 */
+  cacheKey?: string;
 }
 
 export interface XaiToolCall {
@@ -67,19 +69,27 @@ export class XaiClient {
     options: XaiRequestOptions,
     abort?: AbortSignal
   ): AsyncGenerator<XaiStreamEvent> {
+    const { cacheKey, ...rest } = options;
     const body: Record<string, unknown> = {
-      ...options,
-      input: sanitizeInput(options.input),
+      ...rest,
+      input: sanitizeInput(rest.input),
       stream: true,
       store: false
     };
 
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${this.bearerToken}`
+    };
+    // xAI 缓存本身是自动 prefix-based；此 header 只提高命中率（尤其负载均衡时确保同一
+    // 对话落到有缓存的副本）。作为 header 而非 body 字段发送——未知 header 会被忽略，零 400 风险。
+    if (cacheKey) {
+      headers['x-grok-conv-id'] = cacheKey;
+    }
+
     const res = await fetch(`${this.baseUrl}/responses`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${this.bearerToken}`
-      },
+      headers,
       body: JSON.stringify(body),
       signal: abort
     });
@@ -259,4 +269,25 @@ export function parseSseData(data: string): ParsedSseChunk | null {
 /** 该错误是否应触发认证降级（xAI 以 403 拒绝当前档，见 authed-stream）。 */
 export function isAuthFallbackError(e: unknown): boolean {
   return e instanceof XaiError && e.status === 403;
+}
+
+/**
+ * 为一次对话生成稳定缓存键（作为 x-grok-conv-id）。取 system 指令 + 首条用户消息文本
+ * 做 djb2 hash —— 同一对话跨轮不变、不同对话不同。缓存本身是 xAI 自动的 prefix-based，
+ * 此键只提高命中率。纯函数，便于测试。
+ */
+export function promptCacheKey(instructions: string | undefined, input: XaiInputItem[]): string {
+  const firstUser = input.find(
+    (i): i is Extract<XaiInputItem, { role: 'user' | 'assistant' }> =>
+      'role' in i && i.role === 'user'
+  );
+  const firstText = firstUser
+    ? firstUser.content.map((c) => ('text' in c ? c.text : '')).join('')
+    : '';
+  const seed = (instructions ?? '') + ' ' + firstText;
+  let h = 5381;
+  for (let i = 0; i < seed.length; i++) {
+    h = ((h << 5) + h + seed.charCodeAt(i)) >>> 0;
+  }
+  return 'grok-coder-' + h.toString(36);
 }
