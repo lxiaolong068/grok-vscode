@@ -18,32 +18,39 @@ export interface AuthToken {
  * xAI 后端对部分订阅档位的 OAuth API 有 403 门槛，因此保留 API Key 回退。
  */
 export async function getAuthToken(
-  secrets: vscode.SecretStorage
+  secrets: vscode.SecretStorage,
+  exclude: AuthMode[] = []
 ): Promise<AuthToken | undefined> {
   // 1) 复用 CLI 登录态（只读 auth.json，不刷新、不回写——刷新是 CLI 的职责）
-  const cliToken = readGrokCliToken();
-  if (cliToken) {
-    return { token: cliToken, mode: 'grokCli' };
+  if (!exclude.includes('grokCli')) {
+    const cliToken = readGrokCliToken();
+    if (cliToken) {
+      return { token: cliToken, mode: 'grokCli' };
+    }
   }
   // 2) direct 自己的 OAuth 缓存
-  try {
-    const access = await oauth.getValidAccessToken(secrets);
-    if (access) {
-      return { token: access, mode: 'oauth' };
-    }
-  } catch (e) {
-    if (e instanceof oauth.XaiOAuthError && e.requiresRelogin) {
-      void vscode.window.showWarningMessage(
-        'Grok Coder: 登录已过期，请重新运行 "Grok Coder: 登录 Grok 账号"。'
-      );
-    } else {
-      console.warn('Grok Coder OAuth 刷新失败：', e);
+  if (!exclude.includes('oauth')) {
+    try {
+      const access = await oauth.getValidAccessToken(secrets);
+      if (access) {
+        return { token: access, mode: 'oauth' };
+      }
+    } catch (e) {
+      if (e instanceof oauth.XaiOAuthError && e.requiresRelogin) {
+        void vscode.window.showWarningMessage(
+          'Grok Coder: 登录已过期，请重新运行 "Grok Coder: 登录 Grok 账号"。'
+        );
+      } else {
+        console.warn('Grok Coder OAuth 刷新失败：', e);
+      }
     }
   }
   // 3) API Key 回退
-  const apiKey = await getApiKey(secrets, false);
-  if (apiKey) {
-    return { token: apiKey, mode: 'apiKey' };
+  if (!exclude.includes('apiKey')) {
+    const apiKey = await getApiKey(secrets, false);
+    if (apiKey) {
+      return { token: apiKey, mode: 'apiKey' };
+    }
   }
   return undefined;
 }

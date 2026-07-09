@@ -3,7 +3,8 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import { getConfig } from "./config";
 import { ensureAuth } from "./auth";
-import { XaiClient, textMessage } from "./xaiClient";
+import { textMessage, supportsReasoningEffort } from "./xaiClient";
+import { streamWithAuthFallback } from "./authed-stream";
 
 const execFileAsync = promisify(execFile);
 
@@ -36,18 +37,17 @@ export async function generateCommitMessage(secrets: vscode.SecretStorage): Prom
   }
 
   const cfg = getConfig();
-  const client = new XaiClient(cfg.baseUrl, auth.token);
 
   await vscode.window.withProgress(
     { location: vscode.ProgressLocation.SourceControl, title: "Grok 正在生成提交信息…" },
     async () => {
       let message = "";
       try {
-        for await (const ev of client.stream({
+        for await (const ev of streamWithAuthFallback(secrets, cfg.baseUrl, {
           model: cfg.model,
           instructions: COMMIT_PROMPT,
           input: [textMessage("user", `git diff:\n${diff}`)],
-          reasoning: { effort: "low" }
+          reasoning: supportsReasoningEffort(cfg.model) ? { effort: "low" } : undefined
         })) {
           if (ev.type === "text") {
             message += ev.text;

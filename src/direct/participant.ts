@@ -3,7 +3,8 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { getConfig } from './config';
 import { ensureAuth } from './auth';
-import { XaiClient, XaiInputItem, XaiRequestOptions, textMessage } from './xaiClient';
+import { XaiInputItem, XaiRequestOptions, textMessage, supportsReasoningEffort } from './xaiClient';
+import { streamWithAuthFallback } from './authed-stream';
 
 const execFileAsync = promisify(execFile);
 
@@ -37,7 +38,6 @@ export function createGrokParticipant(
       return {};
     }
     const cfg = getConfig();
-    const client = new XaiClient(cfg.baseUrl, auth.token);
     const command = request.command;
 
     // 会话历史（同参与者）
@@ -70,7 +70,7 @@ export function createGrokParticipant(
       model: cfg.model,
       instructions: BASE_SYSTEM_PROMPT + (command ? '\n' + COMMAND_PROMPTS[command] : ''),
       input,
-      reasoning: { effort: cfg.reasoningEffort }
+      reasoning: supportsReasoningEffort(cfg.model) ? { effort: cfg.reasoningEffort } : undefined
     };
     if (command === 'search') {
       if (!cfg.enableLiveSearch) {
@@ -85,7 +85,7 @@ export function createGrokParticipant(
     const abort = new AbortController();
     const sub = token.onCancellationRequested(() => abort.abort());
     try {
-      for await (const ev of client.stream(options, abort.signal)) {
+      for await (const ev of streamWithAuthFallback(context.secrets, cfg.baseUrl, options, abort.signal)) {
         if (token.isCancellationRequested) {
           break;
         }

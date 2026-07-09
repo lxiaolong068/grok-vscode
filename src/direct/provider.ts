@@ -1,11 +1,12 @@
 import * as vscode from 'vscode';
 import { getConfig } from './config';
 import { AuthMode, ensureAuth, getAuthToken } from './auth';
+import { streamWithAuthFallback } from './authed-stream';
 import {
-  XaiClient,
   XaiContentPart,
   XaiInputItem,
-  XaiTool
+  XaiTool,
+  supportsReasoningEffort
 } from './xaiClient';
 
 const GROK_45_CONTEXT = 500_000;
@@ -81,22 +82,16 @@ export class GrokChatProvider implements vscode.LanguageModelChatProvider {
     progress: vscode.Progress<vscode.LanguageModelResponsePart>,
     token: vscode.CancellationToken
   ): Promise<void> {
-    const auth = await getAuthToken(this.secrets);
-    if (!auth) {
-      throw new Error(
-        'Grok Coder：未登录。请运行 "Grok Coder: 登录 Grok 账号" 或设置 API Key。'
-      );
-    }
     const cfg = getConfig();
-    const client = new XaiClient(cfg.baseUrl, auth.token);
-
     const abort = new AbortController();
     const sub = token.onCancellationRequested(() => abort.abort());
     const modelOptions = (options.modelOptions ?? {}) as Record<string, unknown>;
     const { instructions, input } = convertMessages(messages);
 
     try {
-      const events = client.stream(
+      const events = streamWithAuthFallback(
+        this.secrets,
+        cfg.baseUrl,
         {
           model: model.id,
           instructions,
@@ -105,7 +100,9 @@ export class GrokChatProvider implements vscode.LanguageModelChatProvider {
           tool_choice: convertToolMode(options.toolMode, options.tools),
           temperature: numberOrUndefined(modelOptions['temperature']),
           max_output_tokens: numberOrUndefined(modelOptions['max_tokens']),
-          reasoning: { effort: cfg.reasoningEffort }
+          reasoning: supportsReasoningEffort(model.id)
+            ? { effort: cfg.reasoningEffort }
+            : undefined
         },
         abort.signal
       );

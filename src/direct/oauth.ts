@@ -267,7 +267,26 @@ export async function getValidAccessToken(
   return creds.access;
 }
 
-async function refreshCredentials(
+let refreshInFlight: Promise<OAuthCredentials> | undefined;
+
+/**
+ * 并发去重：provider 与 participant 可能同时发现 token 过期并各自触发刷新，
+ * 用同一个 refresh_token 并发刷新会在 refresh-token 轮换下互相作废。
+ * 用模块级 in-flight promise 保证同一时刻只有一次刷新在飞。
+ */
+function refreshCredentials(
+  secrets: vscode.SecretStorage,
+  creds: OAuthCredentials
+): Promise<OAuthCredentials> {
+  if (!refreshInFlight) {
+    refreshInFlight = doRefreshCredentials(secrets, creds).finally(() => {
+      refreshInFlight = undefined;
+    });
+  }
+  return refreshInFlight;
+}
+
+async function doRefreshCredentials(
   secrets: vscode.SecretStorage,
   creds: OAuthCredentials
 ): Promise<OAuthCredentials> {

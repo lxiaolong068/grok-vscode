@@ -198,3 +198,15 @@ export function textMessage(role: 'user' | 'assistant', text: string): XaiInputI
     content: [{ type: role === 'assistant' ? 'output_text' : 'input_text', text }]
   };
 }
+
+/**
+ * 该模型是否支持 `reasoning.effort`。非推理模型（如 grok-code-fast 系）带上
+ * reasoning 会被 xAI 以 400 拒绝，因此配置了这类模型时需省略该字段。纯函数，便于测试。
+ */
+export function supportsReasoningEffort(modelId: string): boolean {
+  const id = modelId.toLowerCase();
+  if (id.includes('code-fast') || id.startsWith('grok-code')) {
+    return false;
+  }
+  return true;
+}

@@ -17,9 +17,28 @@ import { createStatusBar } from "./statusbar";
 
 export function activateDirect(context: vscode.ExtensionContext): void {
   const provider = new GrokChatProvider(context.secrets);
+
+  // BYOK provider 与 @grok 参与者依赖 Copilot Chat 体系的 vscode.lm / vscode.chat；
+  // Cursor 等环境没有这些 API —— 探测存在性 + 各自 try/catch，某块缺席只禁用该块，
+  // 绝不拖垮上游侧边栏（SCM 提交、状态栏、直连命令在所有环境都可用）。
+  if (typeof (vscode as any).lm?.registerLanguageModelChatProvider === "function") {
+    try {
+      context.subscriptions.push(
+        vscode.lm.registerLanguageModelChatProvider("xai-grok", provider)
+      );
+    } catch (e) {
+      console.warn("Grok Coder: 跳过 Chat 模型 provider 注册（当前环境不支持）:", e);
+    }
+  }
+  if (typeof (vscode as any).chat?.createChatParticipant === "function") {
+    try {
+      context.subscriptions.push(createGrokParticipant(context));
+    } catch (e) {
+      console.warn("Grok Coder: 跳过 @grok 聊天参与者注册（当前环境不支持）:", e);
+    }
+  }
+
   context.subscriptions.push(
-    vscode.lm.registerLanguageModelChatProvider("xai-grok", provider),
-    createGrokParticipant(context),
     createStatusBar(context),
 
     vscode.commands.registerCommand("grokCoder.login", async () => {
