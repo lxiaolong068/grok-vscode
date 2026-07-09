@@ -29,3 +29,17 @@
 
 ## 判定
 一个 SKIP（没订阅 / grok 没选择降级等）不算失败，只有 FAIL 才是。验证完把结果回报给维护者。
+
+---
+
+## 验证结果（Codex，2026-07-10）
+
+**结论：整体可发布。** 所有命令通过，6 项清单全部真机通过。
+
+- `npm test` 687 绿 · `tsc` 通过 · `npm run test:live` **7 passed / 0 failed** · `npm run package` 生成 `grok-coder-0.3.1.vsix` · VS Code + Cursor 均安装验证
+- P0-1 Cursor guard ✅ · P0-3 403 降级 ✅（模拟）· **P2-10 缓存 ✅（二次请求 `cached_tokens: 128`）** · P2-12 搜索 ✅（真实 citation，如 `https://x.ai/news`）· P2-11 状态栏 model ✅ · P2-13 /fix 应用 ✅（`return a - b` → `return a + b`，落盘正确）
+
+### 残留待办（非阻塞，后续处理）
+1. **403 降级仅代码路径 + 模拟验证**：没有“真实无权限账号”触发线上真 403，端到端未实测。有此类账号时补一次。
+2. **/fix 选错模型 UX**：`/fix` 曾失败一次，因 VS Code Chat 的模型选择器选到别的 provider（OpenRouter 的 Jamba / Grok 4.20）报 `Language model unavailable`；切回本扩展的 Grok 4.5 即正常。非 bug，但可加更清晰的提示。
+3. **Cursor 重复 view id 日志**：Cursor 里同时装了上游 `pawelhuryn.grok-vscode-phuryn` 所致，非本批引入；测试时卸载上游即可干净。
