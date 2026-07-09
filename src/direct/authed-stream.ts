@@ -7,7 +7,13 @@
  */
 import * as vscode from 'vscode';
 import { AuthMode, getAuthToken } from './auth';
-import { XaiClient, XaiError, XaiRequestOptions, XaiStreamEvent } from './xaiClient';
+import {
+  XaiClient,
+  XaiError,
+  XaiRequestOptions,
+  XaiStreamEvent,
+  isAuthFallbackError
+} from './xaiClient';
 
 export async function* streamWithAuthFallback(
   secrets: vscode.SecretStorage,
@@ -36,7 +42,7 @@ export async function* streamWithAuthFallback(
       first = await iterator.next();
     } catch (e) {
       // 403 且还有下一档可试 → 记下当前档，降级重试
-      if (e instanceof XaiError && e.status === 403) {
+      if (isAuthFallbackError(e)) {
         tried.push(auth.mode);
         continue;
       }

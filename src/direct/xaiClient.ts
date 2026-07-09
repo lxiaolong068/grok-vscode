@@ -115,52 +115,22 @@ export class XaiClient {
           if (!line.startsWith('data:')) {
             continue;
           }
-          const data = line.slice(5).trim();
-          if (!data || data === '[DONE]') {
+          const parsed = parseSseData(line.slice(5).trim());
+          if (!parsed) {
             continue;
           }
-          let ev: any;
-          try {
-            ev = JSON.parse(data);
-          } catch {
-            continue;
-          }
-
-          switch (ev.type) {
-            case 'response.output_text.delta':
-              if (typeof ev.delta === 'string' && ev.delta) {
-                yield { type: 'text', text: ev.delta };
-              }
+          switch (parsed.kind) {
+            case 'text':
+              yield { type: 'text', text: parsed.text };
               break;
-            case 'response.output_item.done': {
-              const item = ev.item;
-              if (item?.type === 'function_call' && item.name) {
-                yield {
-                  type: 'tool_call',
-                  call: {
-                    callId: item.call_id ?? item.id ?? `call_${Date.now()}`,
-                    name: item.name,
-                    arguments: item.arguments ?? '{}'
-                  }
-                };
-              }
+            case 'tool_call':
+              yield { type: 'tool_call', call: parsed.call };
               break;
-            }
-            case 'response.output_text.annotation.added': {
-              const url = ev.annotation?.url;
-              if (typeof url === 'string') {
-                citations.add(url);
-              }
+            case 'citation':
+              citations.add(parsed.url);
               break;
-            }
-            case 'response.failed':
-            case 'error': {
-              const msg =
-                ev.response?.error?.message ?? ev.message ?? ev.error?.message ?? '未知错误';
-              throw new XaiError(`xAI 返回错误：${msg}`);
-            }
-            default:
-              break;
+            case 'error':
+              throw new XaiError(`xAI 返回错误：${parsed.message}`);
           }
         }
       }
@@ -175,7 +145,7 @@ export class XaiClient {
 }
 
 /** 去掉空内容项，规避 xAI 的校验错误。 */
-function sanitizeInput(input: XaiInputItem[]): XaiInputItem[] {
+export function sanitizeInput(input: XaiInputItem[]): XaiInputItem[] {
   return input.filter((item) => {
     if ('role' in item) {
       item.content = item.content.filter(
@@ -209,4 +179,62 @@ export function supportsReasoningEffort(modelId: string): boolean {
     return false;
   }
   return true;
+}
+
+/** 单条 SSE `data:` 载荷解析出的结构化结果（跨行状态如 citations 累积交给调用方）。 */
+export type ParsedSseChunk =
+  | { kind: 'text'; text: string }
+  | { kind: 'tool_call'; call: XaiToolCall }
+  | { kind: 'citation'; url: string }
+  | { kind: 'error'; message: string };
+
+/**
+ * 解析一条 SSE `data:` 载荷为结构化结果；无关/空/`[DONE]`/坏 JSON 返回 null。
+ * 纯函数(唯一例外：function_call 缺 call_id/id 时用时间戳兜底一个唯一 id)。
+ */
+export function parseSseData(data: string): ParsedSseChunk | null {
+  if (!data || data === '[DONE]') {
+    return null;
+  }
+  let ev: any;
+  try {
+    ev = JSON.parse(data);
+  } catch {
+    return null;
+  }
+  switch (ev.type) {
+    case 'response.output_text.delta':
+      return typeof ev.delta === 'string' && ev.delta ? { kind: 'text', text: ev.delta } : null;
+    case 'response.output_item.done': {
+      const item = ev.item;
+      if (item?.type === 'function_call' && item.name) {
+        return {
+          kind: 'tool_call',
+          call: {
+            callId: item.call_id ?? item.id ?? `call_${Date.now()}`,
+            name: item.name,
+            arguments: item.arguments ?? '{}'
+          }
+        };
+      }
+      return null;
+    }
+    case 'response.output_text.annotation.added': {
+      const url = ev.annotation?.url;
+      return typeof url === 'string' ? { kind: 'citation', url } : null;
+    }
+    case 'response.failed':
+    case 'error':
+      return {
+        kind: 'error',
+        message: ev.response?.error?.message ?? ev.message ?? ev.error?.message ?? '未知错误'
+      };
+    default:
+      return null;
+  }
+}
+
+/** 该错误是否应触发认证降级（xAI 以 403 拒绝当前档，见 authed-stream）。 */
+export function isAuthFallbackError(e: unknown): boolean {
+  return e instanceof XaiError && e.status === 403;
 }

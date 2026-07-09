@@ -5,8 +5,22 @@ import { getConfig } from "./config";
 import { ensureAuth } from "./auth";
 import { textMessage, supportsReasoningEffort } from "./xaiClient";
 import { streamWithAuthFallback } from "./authed-stream";
+import { stripFences } from "./text-utils";
+import { pickRepoRootForPath } from "./git-repo";
 
 const execFileAsync = promisify(execFile);
+
+// vscode.git 扩展 API 的最小类型声明（只覆盖本模块用到的表面；完整定义见官方 git.d.ts）
+interface GitRepository {
+  readonly rootUri: vscode.Uri;
+  readonly inputBox: { value: string };
+}
+interface GitApi {
+  readonly repositories: GitRepository[];
+}
+interface GitExtension {
+  getAPI(version: 1): GitApi;
+}
 
 const COMMIT_PROMPT =
   "根据下面的 git diff 生成一条规范的 commit message（Conventional Commits 格式，" +
@@ -17,7 +31,7 @@ const COMMIT_PROMPT =
  * 调 Grok 生成 Conventional Commits 信息，直接填入 Git 输入框。
  */
 export async function generateCommitMessage(secrets: vscode.SecretStorage): Promise<void> {
-  const repo = getGitRepo();
+  const repo = await pickGitRepo();
   if (!repo) {
     vscode.window.showWarningMessage("Grok Coder：未找到 Git 仓库。");
     return;
@@ -63,10 +77,37 @@ export async function generateCommitMessage(secrets: vscode.SecretStorage): Prom
   );
 }
 
-function getGitRepo(): any | undefined {
-  const gitExt = vscode.extensions.getExtension("vscode.git")?.exports;
-  const api = gitExt?.getAPI?.(1);
-  return api?.repositories?.[0];
+function getGitApi(): GitApi | undefined {
+  const gitExt = vscode.extensions.getExtension<GitExtension>("vscode.git");
+  return gitExt?.exports?.getAPI?.(1);
+}
+
+/**
+ * 选目标仓库：单仓直接用；多仓优先活动编辑器所属仓库（最内层），否则弹 QuickPick 让用户选。
+ * 修复此前无条件取 repositories[0] 在多仓工作区可能生成错仓库提交信息的问题。
+ */
+async function pickGitRepo(): Promise<GitRepository | undefined> {
+  const repos = getGitApi()?.repositories ?? [];
+  if (repos.length <= 1) {
+    return repos[0];
+  }
+  const activeFsPath = vscode.window.activeTextEditor?.document.uri.fsPath;
+  const owningRoot = pickRepoRootForPath(
+    repos.map((r) => r.rootUri.fsPath),
+    activeFsPath
+  );
+  const owning = owningRoot ? repos.find((r) => r.rootUri.fsPath === owningRoot) : undefined;
+  if (owning) {
+    return owning;
+  }
+  const pick = await vscode.window.showQuickPick(
+    repos.map((r) => ({
+      label: vscode.workspace.asRelativePath(r.rootUri, false) || r.rootUri.fsPath,
+      repo: r
+    })),
+    { title: "Grok Coder：选择要生成提交信息的 Git 仓库" }
+  );
+  return pick?.repo;
 }
 
 async function getDiff(cwd: string): Promise<string> {
@@ -85,10 +126,3 @@ async function getDiff(cwd: string): Promise<string> {
   return diff.length > MAX ? diff.slice(0, MAX) + "\n... (diff 过长已截断)" : diff;
 }
 
-function stripFences(s: string): string {
-  return s
-    .trim()
-    .replace(/^```[a-z]*\n?/i, "")
-    .replace(/\n?```$/, "")
-    .trim();
-}
