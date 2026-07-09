@@ -16,7 +16,7 @@ function Find-CodeCli {
 }
 
 $code = Find-CodeCli
-Write-Host "Uninstalling PawelHuryn.grok-vscode-phuryn via $code"
-& $code --uninstall-extension PawelHuryn.grok-vscode-phuryn
+Write-Host "Uninstalling brucelee.grok-coder via $code"
+& $code --uninstall-extension brucelee.grok-coder
 Write-Host ""
 Write-Host "Done. Reload VS Code to drop the sidebar."

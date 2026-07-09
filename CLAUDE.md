@@ -39,7 +39,7 @@ This file is the project map: it describes the **current** architecture, not a p
 | `media/chat.{js,css}` | Webview UI — chat rendering (markdown, LaTeX via MathJax, Mermaid diagrams), inline generated media, math/diagram export, history popover. Tool calls are grouped per batch and summarized by ACP **kind** (`categorize`/`summarizeTools`/`titleKind`: "Explored N items" / "Edited N files" / etc., not "Ran N commands" for reads); narration **interleaves** with its tool groups (each narration bubble sits above the tools it introduced — `addToToolGroup` flushes + detaches the agent bubble when a new group starts). Tool/thinking rows are Codex-styled: one lucide **category icon** per row (`toolIconFor`, strongest-action pick: square-terminal > pencil > folder-search > file), flush-left, muted→hover, running group stays "active"; thinking shares the tool chevron (same glyph, right side, `.expanded` rotates it) **and**, when shown, matches the tool rows' size + a leading brain icon (`.thinking-icon` mirrors `.tool-icon`). Thinking traces are **hidden by default** (`grok.showThinking`, #26) behind a `thinking-hidden` body class, with a **"Thinking…"** stand-in + a `ensureActivityIndicator` guarantee that *some* progress affordance is always on screen mid-turn; a floating **scroll-to-bottom** button (#28) anchored in `.composer`. See § ACP surfaces for both. |
 | `media/webview-helpers.js` | Pure webview helpers (file-ref detection, relative-time format, mic-button state machine, trailing send-phrase highlight, subagent classifier `isSubagentToolCall`/`subagentLabel`, failed-tool reason `toolFailureText`, attachment-envelope parser `parseAttachmentContext`); shared between webview and tests |
 | `scripts/install.{ps1,sh}` | Auto-detect VS Code CLI, build .vsix, install |
-| `scripts/uninstall.{ps1,sh}` | Uninstall `PawelHuryn.grok-vscode-phuryn` |
+| `scripts/uninstall.{ps1,sh}` | Uninstall `brucelee.grok-coder` |
 
 Pure modules (`acp-dispatch`, `chips`, `prompt-builder`, `slash-filter`, `cli-locator`, `sessions`, `plan-gate`, `plan-restore`, `grok-primer`, `file-ref`, `plan-review`, `mode-prefs`, `voice`, `session-pool`, `webview-helpers`) were split out specifically so protocol behavior can be unit-tested without spawning processes. (`session.ts` is a plain state bag — no `vscode`/spawn/network either, but it's data, not logic.)
 
@@ -70,7 +70,7 @@ The history popover loads sessions **one page at a time** (`SESSION_PAGE_SIZE = 
 npm install
 npm test         # 640 tests, ~1.5s, vitest — all grok-free (incl. happy-dom DOM tests + fake-CLI ACP integration tests)
 npm run test:perf # opt-in session-history perf simulation (NOT in npm test/CI; see § History pagination)
-npm run package  # → grok-vscode-phuryn-<version>.vsix (clears older *.vsix first)
+npm run package  # → grok-coder-<version>.vsix (clears older *.vsix first)
 ```
 
 ### Test taxonomy — three layers
@@ -166,8 +166,8 @@ What the script encodes, step by step:
 2. `npm test` (640-test floor, all green) + `tsc -p . --noEmit` clean, **and `npm run test:live` against real grok — mandatory, run without asking** (the `release.*` scripts don't run it, so run it by hand before invoking them).
 3. Commit + push to `main` (direct-to-main, no feature branches).
 4. **Annotated git tag** `vX.Y.Z` at the release commit → `git tag -a vX.Y.Z -m "Release vX.Y.Z"` → `git push origin vX.Y.Z`.
-5. **GitHub Release** for that tag → `gh release create vX.Y.Z --title "Release vX.Y.Z" --notes-file <notes> <vsix>` (notes = the new changelog section(s); include any earlier version that was bumped but never released). **Always attach the built `grok-vscode-phuryn-X.Y.Z.vsix` as a release asset** so the exact installable build is downloadable from the release.
-6. **Marketplace publish is separate and explicit** — only `npm run publish` (vsce) when the user asks. The `PawelHuryn` publisher is registered + authenticated locally; publishing ≠ tagging.
+5. **GitHub Release** for that tag → `gh release create vX.Y.Z --title "Release vX.Y.Z" --notes-file <notes> <vsix>` (notes = the new changelog section(s); include any earlier version that was bumped but never released). **Always attach the built `grok-coder-X.Y.Z.vsix` as a release asset** so the exact installable build is downloadable from the release.
+6. **Marketplace publish is separate and explicit** — only `npm run publish` (vsce) when the user asks. The `brucelee` publisher is registered + authenticated locally; publishing ≠ tagging.
 
 Don't skip the tag/release (or the vsix asset) on a release push. (A pure mid-dev version bump that isn't a release — e.g. the unreleased v1.3.0 voice iteration — is the only exception.)
 
@@ -180,6 +180,6 @@ Don't skip the tag/release (or the vsix asset) on a release push. (A pure mid-de
 - Don't introduce abstractions speculatively
 - Don't add comments that explain what well-named code already says
 - 640 tests is the floor — every PR should keep that green. All tests are grok-free (no binary spawn); grok-dependent probes live in `research/*.cjs` and are run manually, never by `npm test` or CI
-- **Rebuilding clears older `.vsix` first** — `npm run package` (and the install/release scripts) delete stale `grok-vscode-phuryn-*.vsix` before building, so only the current version is on disk. After any doc or code change, rebuild + reinstall so the installed extension's bundled docs are current. **Package last:** the vsix bundles `CLAUDE.md`/`README.md`/`docs/` as files, so finish *all* doc + code edits **before** the final `npm run package` + reinstall — otherwise the installed build ships a stale-docs snapshot. If you rebuild mid-task and then touch docs again, rebuild again so the order is always edit-everything → package → reinstall.
+- **Rebuilding clears older `.vsix` first** — `npm run package` (and the install/release scripts) delete stale `grok-coder-*.vsix` before building, so only the current version is on disk. After any doc or code change, rebuild + reinstall so the installed extension's bundled docs are current. **Package last:** the vsix bundles `CLAUDE.md`/`README.md`/`docs/` as files, so finish *all* doc + code edits **before** the final `npm run package` + reinstall — otherwise the installed build ships a stale-docs snapshot. If you rebuild mid-task and then touch docs again, rebuild again so the order is always edit-everything → package → reinstall.
 - **Version bumps are user-initiated.** Iterate at the current version (rebuild the same vsix and reinstall locally) until the user says to bump and publish. Don't bump `package.json` on your own.
-- **Sign GitHub comments.** Every GitHub issue/PR comment posted on the user's behalf ends with a signature on its own final line (italic). Pick by whether Paweł actually reviewed the text before it was posted: if he reviewed it, use `_Written with an agent, reviewed by Paweł_`; if the agent posted it without his review, use `_Written by Pawel's agent_`. Only claim review when it actually happened.
+- **Sign GitHub comments.** Every GitHub issue/PR comment posted on the user's behalf ends with an italic signature on its own final line — e.g. `_Written by an agent_`, or `_Written with an agent, reviewed by the maintainer_` when the maintainer actually reviewed the text first. Only claim review when it actually happened.

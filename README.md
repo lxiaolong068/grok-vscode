@@ -13,7 +13,7 @@
 
 # Grok Build for VS Code (Community)
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![VS Code](https://img.shields.io/badge/VS%20Code-Extension-007ACC?logo=visualstudiocode&logoColor=white)](https://code.visualstudio.com) [![Unofficial](https://img.shields.io/badge/Unofficial-community%20%C2%B7%20MIT-FF6B35)](#) [![The Product Compass](https://img.shields.io/badge/The%20Product%20Compass-productcompass.pm-FF6B35)](https://www.productcompass.pm)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![VS Code](https://img.shields.io/badge/VS%20Code-Extension-007ACC?logo=visualstudiocode&logoColor=white)](https://code.visualstudio.com) [![Unofficial](https://img.shields.io/badge/Unofficial-community%20%C2%B7%20MIT-FF6B35)](#)
 
 > A VS Code UI for **xAI's Grok Build CLI** — not affiliated with or endorsed by xAI. *Grok*, *Grok Build*, and *xAI* are trademarks of xAI; this project uses those names only to describe what it's compatible with.
 
@@ -21,7 +21,7 @@ Use Grok Build inside a VS Code panel, drop your open files in as `@`-context, k
 
 You install the `grok` CLI once and sign in — with a **SuperGrok or X Premium+ subscription**, or an **xAI API key** — and the extension is the GUI on top.
 
-**Install free from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=PawelHuryn.grok-vscode-phuryn) or [Open VSX Registry](https://open-vsx.org/extension/PawelHuryn/grok-vscode-phuryn)**
+**Install free from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=brucelee.grok-coder) or [Open VSX Registry](https://open-vsx.org/extension/brucelee/grok-coder)**
 
 ![Grok Build in the VS Code sidebar](docs/screenshots/v1.4.20.png)
 
@@ -68,17 +68,17 @@ grok login
 
 **2. Install the extension.**
 
-From the Marketplace — search **Grok Build** by *PawelHuryn*, or:
+From the Marketplace — search **Grok Coder** by *brucelee*, or:
 
 ```bash
-code --install-extension PawelHuryn.grok-vscode-phuryn
+code --install-extension brucelee.grok-coder
 ```
 
 Or build from source:
 
 ```bash
-git clone https://github.com/phuryn/grok-build-vscode.git
-cd grok-build-vscode
+git clone https://github.com/hiliqi/grok-vscode.git
+cd grok-vscode
 npm install
 ./scripts/install.sh        # Windows: pwsh scripts\install.ps1
 ```
@@ -89,7 +89,7 @@ Reload VS Code (**Ctrl+Shift+P → Developer: Reload Window**) and click the Gro
 >
 > ![Right-click the Grok icon → Move To → Secondary Side Bar](docs/screenshots/side.png)
 
-**Uninstall:** `./scripts/uninstall.sh` (Windows: `pwsh scripts\uninstall.ps1`) or `code --uninstall-extension PawelHuryn.grok-vscode-phuryn`.
+**Uninstall:** `./scripts/uninstall.sh` (Windows: `pwsh scripts\uninstall.ps1`) or `code --uninstall-extension brucelee.grok-coder`.
 
 ---
 
@@ -323,7 +323,7 @@ Full diagram, message flow, module map, and design notes: **[docs/architecture.m
 ```bash
 npm install
 npm test         # grok-free unit/DOM/integration suite — exactly what CI runs
-npm run package  # → grok-vscode-phuryn-<version>.vsix
+npm run package  # → grok-coder-<version>.vsix
 ```
 
 `npm test` is grok-free, so **local ≡ CI** — it never spawns the real binary. A separate, on-demand `npm run test:live` drives the actual `grok` end-to-end (handshake, restore, plan-mode, image/video gen) and is run **before a release**, not on every commit. Full test taxonomy and what's deferred to a future `@vscode/test-electron` suite: **[TESTS.md](TESTS.md)**. Architecture and module map: **[docs/architecture.md](docs/architecture.md)**.

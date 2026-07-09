@@ -18,7 +18,7 @@ export const APTABASE_APP_KEY_PROD = "A-EU-2294571902";
 export const APTABASE_APP_KEY_DEV = "A-EU-5074036690";
 
 /** The label Aptabase shows as the SDK that sent the event. */
-export const TELEMETRY_SDK = "grok-vscode-phuryn";
+export const TELEMETRY_SDK = "grok-coder";
 
 export interface SystemProps {
   appVersion: string;
