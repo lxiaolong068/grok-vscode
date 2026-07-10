@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { shortModel } from "./status-label";
 
 /**
  * 状态栏指示器（上游 roadmap 未实现项）：显示 Grok Build 当前默认模型与推理强度，
@@ -72,8 +73,4 @@ export function createStatusBar(
     context.subscriptions.push(statusListener);
   }
   return item;
-}
-
-function shortModel(id: string): string {
-  return id.replace(/^grok-/, "").slice(0, 20) || id;
 }

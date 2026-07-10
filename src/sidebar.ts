@@ -892,6 +892,18 @@ See design doc for the full state machine diagram.`;
     return this.focused.client?.currentModelId;
   }
 
+  /**
+   * Push the live model (or config fallback) to the status bar.
+   * Must fire whenever the focused session's model *may* have changed — not only
+   * on `modelChanged`. New/resumed sessions often skip `session/set_model` when
+   * the CLI already opened on the desired model, so without this the bar keeps
+   * the previous session's label (e.g. still "composer-…" after switching to
+   * grok-4.5).
+   */
+  private notifyStatus(): void {
+    this.statusEmitter.fire();
+  }
+
   dispose(): void {
     if (this.reaper) { clearInterval(this.reaper); this.reaper = undefined; }
     void this.disposePool();
@@ -1359,11 +1371,13 @@ See design doc for the full state machine diagram.`;
         models: client.availableModels,
         currentModelId: client.currentModelId,
       });
+      // Session open is the authoritative model source even when no set_model ran.
+      if (session === this.focused) this.notifyStatus();
     });
     client.on("modelChanged", (id) => {
       if (gen !== session.gen) return;
       this.emit(session, { type: "modelChanged", modelId: id });
-      this.statusEmitter.fire();
+      if (session === this.focused) this.notifyStatus();
     });
     client.on("modeChanged", (id) => {
       if (gen !== session.gen) return;
@@ -2851,6 +2865,7 @@ See design doc for the full state machine diagram.`;
     }
     this.postMode();
     this.postSessionsList();
+    this.notifyStatus(); // focused session may have a different live model
   }
 
   /**

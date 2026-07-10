@@ -418,6 +418,33 @@ describe("gear settings lock (model + effort disabled while busy / priming)", ()
     expect(modelBtn(doc).textContent).not.toContain("grok-build");
   });
 
+  it("refreshes the open gear model label on modelChanged (no reopen needed)", () => {
+    const { window, doc } = bootWithModels();
+    click(window, $(doc, "gear-btn"));
+    expect(modelBtn(doc).textContent).toContain("Grok Build");
+
+    dispatch(window, { type: "modelChanged", modelId: "grok-composer-2.5-fast" });
+    // Gear truncates the label to 16 chars ("Composer 2.5 Fas…").
+    expect(modelBtn(doc).textContent).toMatch(/Composer 2\.5/);
+    expect(modelBtn(doc).textContent).not.toContain("Grok Build");
+  });
+
+  it("refreshes the open gear model label when a session event reports a new model without modelChanged", () => {
+    // Cross-agent restart / new session: CLI often already opens on the desired
+    // model so set_model is skipped and modelChanged never fires.
+    const { window, doc } = bootWithModels();
+    click(window, $(doc, "gear-btn"));
+    expect(modelBtn(doc).textContent).toContain("Grok Build");
+
+    dispatch(window, {
+      type: "session",
+      sessionId: "s2",
+      models,
+      currentModelId: "grok-composer-2.5-fast",
+    });
+    expect(modelBtn(doc).textContent).toMatch(/Composer 2\.5/);
+  });
+
   it("when idle, the model button opens the picker and a pick posts setModel", () => {
     const { window, posted, doc } = bootWithModels();
     click(window, $(doc, "gear-btn"));

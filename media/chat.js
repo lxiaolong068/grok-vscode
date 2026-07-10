@@ -1194,6 +1194,13 @@
     gearPopover.hidden = false;
   }
 
+  /** Re-render the gear popover's model label/list when the live model changes. */
+  function refreshGearModelUi() {
+    if (gearPopover.hidden) return;
+    if (state.gearView === "model") renderModelPicker();
+    else if (state.gearView === "main" || !state.gearView) renderGearMain();
+  }
+
   // Open the gear popover straight to the Version & about panel (used by the
   // welcome screen's "about" link). No-op if it's already showing About.
   function openAboutPanel() {
@@ -3427,6 +3434,9 @@
         const m = state.availableModels.find((x) => x.modelId === msg.currentModelId);
         if (m?.totalContextTokens) state.contextWindow = m.totalContextTokens;
         updateDonut(0);
+        // Refresh gear if open — new/resumed sessions often never emit modelChanged
+        // (CLI already on the desired model), so the button would keep the old name.
+        refreshGearModelUi();
         break;
       }
       case "modelChanged": {
@@ -3437,6 +3447,7 @@
         // donut keeps showing the wrong ceiling and an inflated percentage.
         const m = state.availableModels.find((x) => x.modelId === msg.modelId);
         if (m && m.totalContextTokens) { state.contextWindow = m.totalContextTokens; updateDonut(); }
+        refreshGearModelUi();
         break;
       }
       case "modeChanged":
