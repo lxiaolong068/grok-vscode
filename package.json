@@ -417,7 +417,9 @@
     "telemetry:probe": "tsc -p . && node scripts/telemetry-probe.cjs",
     "prepackage": "node -e \"for (const f of require('fs').readdirSync('.')) if (f.endsWith('.vsix')) require('fs').unlinkSync(f)\"",
     "package": "npx @vscode/vsce package",
-    "publish": "npx @vscode/vsce publish"
+    "publish": "npx @vscode/vsce publish",
+    "compile:integration": "tsc -p integration/tsconfig.json",
+    "test:integration": "npm run compile && npm run compile:integration && vscode-test"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
@@ -425,7 +427,10 @@
     "@types/ws": "^8.18.1",
     "happy-dom": "^20.9.0",
     "typescript": "^5.4.0",
-    "vitest": "^1.6.0"
+    "vitest": "^1.6.0",
+    "@types/mocha": "^10.0.10",
+    "@vscode/test-cli": "^0.0.10",
+    "@vscode/test-electron": "^2.5.2"
   },
   "dependencies": {
     "ws": "^8.21.0"

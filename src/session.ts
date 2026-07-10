@@ -1,4 +1,5 @@
 import { AcpClient } from "./acp";
+import type { HostMsg } from "./protocol";
 
 /** Live state for the dashboard dot. `cold` (no live process) is represented by
  *  the absence of a Session, so it isn't in this union. */
@@ -115,6 +116,14 @@ export class Session {
   /** grok's id for this session (set on session/new or session/load). */
   activeSessionId?: string;
 
+  /**
+   * Session-scoped `[Image #N]` counter — the highest index used so far.
+   * Incremented per attached image and NEVER reset on send, so every image in
+   * one conversation gets a distinct tag. On restore it's re-seeded from the
+   * replayed prompts' tags (sidebar's userMessageChunk handler).
+   */
+  imageCounter = 0;
+
   titleGenerated = false;
   firstUserMessageForTitle?: string;
 
@@ -144,5 +153,5 @@ export class Session {
    * buffers here, so re-focusing replays the buffer (clearMessages + replay)
    * to reconstruct the view losslessly — no grok reload, no process kill.
    */
-  buffer: unknown[] = [];
+  buffer: HostMsg[] = [];
 }

@@ -8,6 +8,40 @@
     "vue","svelte","astro","sql","prisma","graphql","gql",
   ]);
 
+  // The host <-> webview message contract. These MUST stay in sync with the TS
+  // discriminated unions in src/protocol.ts (which is the source of truth) — the
+  // webview is plain JS and can't import the compiled types, so it carries its own
+  // copy and test/protocol.test.ts asserts the two are set-equal in both
+  // directions (and that chat.js actually handles every host type).
+  const HOST_MESSAGE_TYPES = [
+    "initialState", "showThinking", "fontScale", "grokUpdateStatus", "initialized",
+    "cliUpdating", "session", "modelChanged", "modeChanged", "openModePopover",
+    "voiceState", "voiceConfigured", "voicePartial", "voiceSubmit", "voiceTranscript",
+    "voiceError", "chips", "commandsUpdate", "userMessage", "agentStart", "thoughtChunk",
+    "messageChunk", "media", "userMessageChunk", "historyReplay", "permissionHistoryQueue",
+    "planHistoryQueue", "planProcessing", "toolCall", "toolCallUpdate", "permissionRequest",
+    "permissionResolved", "exitPlanRequest", "questionRequest", "planNotice", "planBlocked",
+    "promptComplete", "agentReset", "agentError", "agentEnd", "exit", "setBusy", "summarizing",
+    "sessionContext", "clearMessages", "onboarding", "error", "xaiNotification", "sessions",
+    "sessionDot",
+  ];
+  const WEBVIEW_MESSAGE_TYPES = [
+    "ready", "send", "newSession", "cancel", "pickModel", "setMode", "removeChip",
+    "toggleChip", "openFile", "openUrl", "openDiff", "exportExpr", "setEffort",
+    "openGlobalConfig", "openProjectConfig", "runMcpList", "showLogs", "setShowThinking",
+    "dropFile", "permissionAnswer", "exitPlanAnswer", "questionAnswer", "questionCancel",
+    "setModel", "runInstallCmd", "runGrokLogin", "logout", "checkGrokUpdate", "updateGrok",
+    "recheckConnection", "listSessions", "resumeSession", "renameSession", "deleteSession",
+    "clearAllSessions", "pickFile", "pasteImage", "voiceStart", "voiceStop",
+  ];
+  const HOST_MESSAGE_TYPE_SET = new Set(HOST_MESSAGE_TYPES);
+  /** True when `type` is a host->webview message the contract knows about. A
+   *  false here means the host posted a type this webview build can't handle —
+   *  drift the sync test is designed to prevent, warned at runtime as a backstop. */
+  function isKnownHostMessage(type) {
+    return HOST_MESSAGE_TYPE_SET.has(type);
+  }
+
   function looksLikeFileRef(s) {
     if (!s || s.length > 200) return false;
     const core = s.replace(/[:#].*$/, "");
@@ -253,7 +287,114 @@
     return { files, body };
   }
 
-  const api = { FILE_EXTS, looksLikeFileRef, formatRelativeTime, modelDisplayName, MIC_STATES, nextMicState, trailingSendPhrase, buildQuestionAnswers, isSubagentToolCall, subagentLabel, shouldStickToBottom, splitMath, stripUnsupportedTex, toolFailureText, parseAttachmentContext };
+  // Parse the leading fenced selection snippets buildPrompt (src/prompt-builder.ts)
+  // emits for chips carrying a selection range, so restore re-renders them as
+  // ranged chips (`a.ts:2-4`) instead of inline code blocks — matching the live
+  // bubble. Must stay in sync with buildPrompt's block format:
+  //
+  //   `src/a.ts` (lines 2-4):
+  //   ```ts
+  //   …the selected lines…
+  //   ```
+  //
+  // On the wire the snippets sit between the <vscode-context> envelope and the
+  // user's own text, blank-line separated. Only complete blocks anchored at the
+  // START of the body are peeled: a selection-shaped block in the middle of the
+  // user's words stays put, and a half-streamed block (replay re-parses the whole
+  // bubble on every chunk) stays in the body until its closing fence arrives.
+  // buildPrompt does no fence escaping, so selected code containing a bare ```
+  // line is ambiguous on the wire — we stop at the first standalone closing
+  // fence, exactly as a markdown renderer would. Returns
+  // { body, selections: [{path, start, end}] } with selections in block order.
+  function parseSelectionBlocks(body) {
+    const input = typeof body === "string" ? body : body || "";
+    if (input.indexOf("(lines ") === -1 || input.indexOf("```") === -1) {
+      return { body: input, selections: [] };
+    }
+    const HEADER = /^`([^`\n]+)` \(lines ([1-9]\d*)-([1-9]\d*)\):\n```[^\n]*\n/;
+    const CLOSE = /(?:^|\n)```[ \t]*(?:\n|$)/;
+    const selections = [];
+    let rest = input;
+    for (;;) {
+      rest = rest.replace(/^\n+/, "");
+      const header = rest.match(HEADER);
+      if (!header) break;
+      const start = Number(header[2]);
+      const end = Number(header[3]);
+      if (end < start) break; // not a shape buildPrompt produces
+      const afterHeader = rest.slice(header[0].length);
+      const close = afterHeader.match(CLOSE);
+      if (!close) break; // half-streamed block — leave it for the next chunk
+      selections.push({ path: header[1], start, end });
+      rest = afterHeader.slice(close.index + close[0].length);
+    }
+    if (!selections.length) return { body: input, selections: [] };
+    return { body: rest.trim(), selections };
+  }
+
+  // Parse the `[Image #N]` tags that buildPromptWithImages (src/prompt-builder.ts)
+  // puts in the prompt text back out of a replayed body, so restore re-renders
+  // image chips instead of raw tags. Must stay in sync with that format.
+  // Current wire shape: one tag per TRAILING line, whose parenthetical carries a
+  // do-not-Read hint — `[Image #N] (attached inline — …)` for pasted images,
+  // `[Image #N] (origin/rel/path.png — attached inline; …)` for disk imports
+  // (grok's CLI keeps its own copy of an inline image under the session's
+  // assets/ dir and surfaces that path to the model, which then Read-attempts
+  // the binary and fails — the hint stops that). Hint-less legacy shapes
+  // (`[Image #N]`, `[Image #N] (path)`, LEADING tag lines, a single leading
+  // inline `[Image #N] ` prefix) still parse. A tag-looking string in the
+  // MIDDLE of the body is the user's own words and is left alone. Returns
+  // { body, images: [{index, path?}] } with images in tag order.
+  function parseImageTags(body) {
+    if (typeof body !== "string" || body.indexOf("[Image #") === -1) {
+      return { body: typeof body === "string" ? body : body || "", images: [] };
+    }
+    // Path capture is greedy + $-anchored so a parenthesized filename parses —
+    // `shots/screenshot (1).png`, the browser-download dedup shape: backtracking
+    // puts the close on the LAST `)`. A literal empty `()` no longer matches
+    // (buildPromptWithImages never emits one), so that stays user text.
+    const TAG_LINE = /^\[Image #(\d+)\](?: \((.+)\))?$/;
+    // Strip the do-not-Read hint from the captured parenthetical: a capture
+    // that IS the hint (pasted image) has no path; a `path — attached inline…`
+    // capture keeps only the path. No hint marker → legacy capture, kept whole.
+    const HINT = " — attached inline";
+    const pathFromTag = (raw) => {
+      if (!raw || raw.indexOf("attached inline") === 0) return undefined;
+      const cut = raw.indexOf(HINT);
+      return cut === -1 ? raw : raw.slice(0, cut);
+    };
+    const lines = body.split("\n");
+    const trailing = [];
+    let end = lines.length;
+    while (end > 0) {
+      const line = lines[end - 1].trim();
+      if (line === "" && trailing.length === 0) { end -= 1; continue; } // trailing blank lines
+      const m = line.match(TAG_LINE);
+      if (!m) break;
+      trailing.unshift({ index: Number(m[1]), path: pathFromTag(m[2]) });
+      end -= 1;
+    }
+    let start = 0;
+    const leading = [];
+    while (start < end) {
+      const m = lines[start].trim().match(TAG_LINE);
+      if (!m) break;
+      leading.push({ index: Number(m[1]), path: pathFromTag(m[2]) });
+      start += 1;
+    }
+    let rest = lines.slice(start, end).join("\n").trim();
+    // Legacy single-image shape: "[Image #1] what is this?" — tag inline at the
+    // very start of the text. Only strip when it's the body's first characters.
+    const inline = rest.match(/^\[Image #(\d+)\] (?=\S)/);
+    if (inline) {
+      leading.push({ index: Number(inline[1]), path: undefined });
+      rest = rest.slice(inline[0].length);
+    }
+    return { body: rest.trim(), images: [...leading, ...trailing] };
+  }
+
+  const api = { FILE_EXTS, HOST_MESSAGE_TYPES, WEBVIEW_MESSAGE_TYPES, isKnownHostMessage, looksLikeFileRef, formatRelativeTime, modelDisplayName, MIC_STATES, nextMicState, trailingSendPhrase, buildQuestionAnswers, isSubagentToolCall, subagentLabel, shouldStickToBottom, splitMath, stripUnsupportedTex, toolFailureText, parseAttachmentContext, parseSelectionBlocks, parseImageTags };
+
   if (typeof module !== "undefined" && module.exports) {
     module.exports = api;
   } else {

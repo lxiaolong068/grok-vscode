@@ -25,7 +25,10 @@ This file is the project map: it describes the **current** architecture, not a p
 | `src/chips.ts` | File-chip CRUD (pure) |
 | `src/prompt-builder.ts` | Chip → prompt-string: whole-file chips become a plain path list (NOT `@`-reads — those force a full read and fail on binaries; grok decides how to consume each path), **split by origin** — files the user explicitly attached under **"Attached file(s):"** (strong intent) vs the auto-included active-editor file under **"Currently open in the editor (for context):"** (ambient, via `isImplicitChip`); selected-range chips become fenced code blocks. The file-path context is wrapped in a machine-readable `<vscode-context>` envelope (`CONTEXT_TAG_OPEN`/`CLOSE`) so the webview can parse it back deterministically on restore (`parseAttachmentContext`) and re-render filename-only chips instead of the raw replayed paths |
 | `src/slash-filter.ts` | Slash-command autocomplete filter |
-| `src/plan-gate.ts` | Plan-mode policy (pure) — workspace-write containment, read-only command allowlist, permission/plan-file classification |
+| `src/plan-gate.ts` | Plan-mode policy (pure) — workspace-write containment, read-only command allowlist (incl. `&&`/`||`/`;` chains when every segment is read-only), permission/plan-file classification |
+| `src/protocol.ts` | Host↔webview message contract (`HostMsg` / `WebviewMsg`); single source of truth for `post`/`emit` typing |
+| `src/grok-config.ts` | Pure `config.toml` helpers — detect global/project `permission_mode = always-approve` (#31) |
+| `src/chips.ts` / `src/prompt-builder.ts` | File chips + vision image chips; slash-leading prompts for `/compact`; ACP text+image blocks |
 | `src/plan-restore.ts` | Plan persist + restore decision (pure) — appendPlanEntry + decideRestoreState |
 | `src/grok-primer.ts` | Hidden plan-mode primer text + version/marker constants + pure `isPrimerText()` (detects the primer when grok replays it on restore, so it's hidden + not counted toward plan positions) + `isPrimerSummary()` (matches grok's primer-derived session titles — cheap pre-filter for the empty-session sweep) |
 | `src/sessions.ts` | Disk-driven session listing/delete + customName overrides + **empty-primer-session detection** (`extractUserQueries`/`classifyUserQueries`/`isEmptyPrimerSession`, all pure) — reads grok's `chat_history.jsonl` to confirm a session got the primer and no real query |
@@ -41,7 +44,7 @@ This file is the project map: it describes the **current** architecture, not a p
 | `scripts/install.{ps1,sh}` | Auto-detect VS Code CLI, build .vsix, install |
 | `scripts/uninstall.{ps1,sh}` | Uninstall `brucelee.grok-coder` |
 
-Pure modules (`acp-dispatch`, `chips`, `prompt-builder`, `slash-filter`, `cli-locator`, `sessions`, `plan-gate`, `plan-restore`, `grok-primer`, `file-ref`, `plan-review`, `mode-prefs`, `voice`, `session-pool`, `webview-helpers`) were split out specifically so protocol behavior can be unit-tested without spawning processes. (`session.ts` is a plain state bag — no `vscode`/spawn/network either, but it's data, not logic.)
+Pure modules (`acp-dispatch`, `chips`, `prompt-builder`, `slash-filter`, `cli-locator`, `sessions`, `plan-gate`, `plan-restore`, `grok-primer`, `file-ref`, `plan-review`, `mode-prefs`, `voice`, `session-pool`, `protocol`, `grok-config`, `webview-helpers`) were split out specifically so protocol behavior can be unit-tested without spawning processes. (`session.ts` is a plain state bag — no `vscode`/spawn/network either, but it's data, not logic.)
 
 ## Session pool (Agent Dashboard, v1.4.8)
 
@@ -77,8 +80,8 @@ npm run package  # → grok-coder-<version>.vsix (clears older *.vsix first)
 
 There are **three** kinds of tests, and it matters which is which:
 
-1. **`npm test` — grok-free unit/DOM/integration suite (640 tests).** Pure logic, happy-dom tests that drive the real `media/chat.js`, a real-`/bin/sh` TerminalManager smoke, and a fake-CLI ACP integration suite (`test/fixtures/fake-grok-acp.cjs`). **Never spawns the real `grok` binary.** Runs in <2s with no network, no login, no subscription. This is the floor — every change keeps it green. (A separate opt-in `npm run test:perf` runs the session-history perf simulation — `test/*.perf.ts` via `vitest.perf.config.ts`, matched only by that config so it stays out of `npm test`/CI; see § History pagination.)
-2. **CI — the *same* suite.** `.github/workflows/ci.yml` runs `npm ci && npm test && npm run package` on a clean Ubuntu box. **CI ≡ layer 1, verbatim** — there is no separate CI-only set. CI has no `grok` binary, no auth, no SuperGrok subscription, so it *cannot* run anything that touches the real CLI. That's the whole reason layer 1 is grok-free.
+1. **`npm test` — grok-free unit/DOM/integration suite (788 tests).** Pure logic, happy-dom tests that drive the real `media/chat.js`, a real-`/bin/sh` TerminalManager smoke, and a fake-CLI ACP integration suite (`test/fixtures/fake-grok-acp.cjs`). **Never spawns the real `grok` binary.** Runs in <2s with no network, no login, no subscription. This is the floor — every change keeps it green. (A separate opt-in `npm run test:perf` runs the session-history perf simulation — `test/*.perf.ts` via `vitest.perf.config.ts`, matched only by that config so it stays out of `npm test`/CI; see § History pagination.)
+2. **CI — unit suite + package + Extension Host smoke.** `.github/workflows/ci.yml` runs `npm ci && npm test && npm run package` plus `xvfb-run npm run test:integration` (`@vscode/test-electron`, missing-CLI path — no real grok).
 3. **`npm run test:live` — on-demand pre-release suite against REAL grok (`scripts/live-tests.cjs`).** Spawns the actual `grok agent stdio` and exercises the surfaces layers 1–2 can't: the real ACP handshake, a prompt round-trip, session restore, plan-mode enforcement, and the v1.4.x generative features (image gen, video gen; the subagent path is exercised opportunistically and SKIPs when grok doesn't delegate — it's deferred/research-only). It **reuses the real compiled modules** (`out/acp-dispatch.js`, `out/plan-gate.js`, `media/webview-helpers.js`) — it feeds genuine wire output through the same `isMediaGenToolCall`/`extractGeneratedMediaPaths`/`isSubagentToolCall`/`shouldBlockWrite` the extension uses, not a re-implementation. **Always run it before every release-to-`main` — it's a non-negotiable, standing part of the release gate; run it without asking** (it needs a logged-in grok + subscription and burns credits, so it must never be in `npm test` or CI, but it is mandatory before any tag/release). Flags: `--quick` (skip the slow generative tests), `--only=`, `--skip=`, `GROK_BIN=…`. A SKIP (no subscription, grok chose not to delegate, etc.) does not fail the gate — only a FAIL does. Real-grok **diagnostic probes** (`research/*.cjs`) remain manual one-offs for capturing wire shapes; the live suite is the repeatable gate.
 
 **So:** local == CI (both grok-free). The real-grok tests are a separate, mandatory pre-release gate — always run before a tag/release (no need to ask), never on every commit.
@@ -148,7 +151,7 @@ grok-coder is a **detached fork** of [phuryn/grok-build-vscode](https://github.c
 - **Rebranded — always keep ours:** `package.json` identity, `README`/`CLAUDE.md` publish IDs, welcome byline, telemetry SDK name (`grok-coder`).
 - **Shared surface — real conflict risk:** the ACP side (`src/sidebar.ts`, `src/acp*.ts`, `src/session*.ts`, `src/plan*.ts`, …) and `media/chat.js`, where both sides edit.
 
-Upstream is at **1.4.30** (no new commits to sync as of 2026-07).
+Upstream last synced to **v1.5.1** (`d128de8`, 2026-07-10) — see [docs/upstream-sync-v1.5.1.md](docs/upstream-sync-v1.5.1.md).
 
 **Sync procedure:**
 

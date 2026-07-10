@@ -21,3 +21,7 @@ dist/**
 esbuild.js
 *.vsix
 docs/调研报告*.md
+integration/**
+out-integration/**
+.vscode-test.mjs
+.vscode-test/**

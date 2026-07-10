@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
 // @ts-expect-error — plain JS module, no types
-import { looksLikeFileRef, formatRelativeTime, FILE_EXTS, modelDisplayName, nextMicState, trailingSendPhrase, buildQuestionAnswers, isSubagentToolCall, subagentLabel, shouldStickToBottom, splitMath, stripUnsupportedTex, parseAttachmentContext } from "../media/webview-helpers.js";
-import { buildPrompt } from "../src/prompt-builder";
-import { makeExplicitChip, makeImplicitChip } from "../src/chips";
+import { looksLikeFileRef, formatRelativeTime, FILE_EXTS, modelDisplayName, nextMicState, trailingSendPhrase, buildQuestionAnswers, isSubagentToolCall, subagentLabel, shouldStickToBottom, splitMath, stripUnsupportedTex, parseAttachmentContext, parseSelectionBlocks, parseImageTags } from "../media/webview-helpers.js";
+import { buildPrompt, buildPromptWithImages } from "../src/prompt-builder";
+import { makeExplicitChip, makeImplicitChip, makeImageChip } from "../src/chips";
 
 describe("looksLikeFileRef", () => {
   it("accepts a bare filename with a known extension", () => {
@@ -169,15 +169,207 @@ describe("parseAttachmentContext", () => {
     });
   });
 
-  it("keeps a fenced selection block in the body (it's not part of the envelope)", () => {
+  it("leaves a fenced selection block in the body (parseSelectionBlocks owns it)", () => {
     const prompt = buildPrompt("what is this", [makeExplicitChip("/x/a.ts", "a.ts", 1, 1)], {
       readFile: () => "const x = 1;",
       extName: () => ".ts",
     });
     const { files, body } = parseAttachmentContext(prompt);
     expect(files).toEqual([]);
-    expect(body).toContain("```ts");
+    expect(body).toContain("`a.ts` (lines 1-1):");
     expect(body).toContain("what is this");
+  });
+});
+
+describe("parseSelectionBlocks", () => {
+  const deps = {
+    readFile: () => "line1\nline2\nline3\nline4\nline5",
+    extName: () => ".ts",
+  };
+
+  it("passes plain text through untouched", () => {
+    expect(parseSelectionBlocks("just a message")).toEqual({ body: "just a message", selections: [] });
+  });
+
+  it("round-trips a buildPrompt selection snippet back into path + range", () => {
+    const prompt = buildPrompt("what is this", [makeExplicitChip("/x/a.ts", "src/a.ts", 2, 4)], deps);
+    const { body } = parseAttachmentContext(prompt);
+    expect(parseSelectionBlocks(body)).toEqual({
+      body: "what is this",
+      selections: [{ path: "src/a.ts", start: 2, end: 4 }],
+    });
+  });
+
+  it("round-trips multiple leading snippets, including a single-line one", () => {
+    const prompt = buildPrompt(
+      "compare",
+      [makeExplicitChip("/x/a.ts", "src/a.ts", 2, 4), makeImplicitChip("/x/b.ts", "src/b.ts", 5, 5)],
+      deps,
+    );
+    expect(parseSelectionBlocks(prompt)).toEqual({
+      body: "compare",
+      selections: [
+        { path: "src/a.ts", start: 2, end: 4 },
+        { path: "src/b.ts", start: 5, end: 5 },
+      ],
+    });
+  });
+
+  it("survives an envelope + snippet + text prompt end to end", () => {
+    const prompt = buildPrompt(
+      "explain",
+      [makeExplicitChip("/x/CLAUDE.md", "CLAUDE.md"), makeExplicitChip("/x/a.ts", "src/a.ts", 2, 4)],
+      deps,
+    );
+    const env = parseAttachmentContext(prompt);
+    expect(env.files).toEqual(["CLAUDE.md"]);
+    expect(parseSelectionBlocks(env.body)).toEqual({
+      body: "explain",
+      selections: [{ path: "src/a.ts", start: 2, end: 4 }],
+    });
+  });
+
+  it("leaves a half-streamed block alone until the closing fence arrives", () => {
+    const partial = "`src/a.ts` (lines 2-4):\n```ts\nline2\nline3";
+    expect(parseSelectionBlocks(partial)).toEqual({ body: partial, selections: [] });
+  });
+
+  it("does not strip a selection-shaped block in the middle of the user's own words", () => {
+    const body =
+      "please explain this\n\n`src/a.ts` (lines 2-4):\n```ts\nline2\n```";
+    expect(parseSelectionBlocks(body)).toEqual({ body, selections: [] });
+  });
+
+  it("stops at the first standalone closing fence when the snippet contains ``` itself", () => {
+    // buildPrompt does no fence escaping, so a selection containing a bare ```
+    // line produces an ambiguous wire — match short, exactly like markdown would.
+    const body = "`a.md` (lines 1-3):\n```md\nsome\n```\n\nrest of message";
+    expect(parseSelectionBlocks(body)).toEqual({
+      body: "rest of message",
+      selections: [{ path: "a.md", start: 1, end: 3 }],
+    });
+  });
+
+  it("chains with the envelope and image parsers over a full buildPromptWithImages wire", () => {
+    // envelope → selection snippet → user text → trailing [Image #N] tag: each
+    // parser peels exactly its own layer of the real combined wire.
+    const { text } = buildPromptWithImages(
+      "explain",
+      [makeExplicitChip("/x/CLAUDE.md", "CLAUDE.md"), makeExplicitChip("/x/a.ts", "src/a.ts", 2, 4)],
+      [{ index: 1, mimeType: "image/png", data: "AA" }],
+      deps,
+    );
+    const env = parseAttachmentContext(text);
+    expect(env.files).toEqual(["CLAUDE.md"]);
+    const sel = parseSelectionBlocks(env.body);
+    expect(sel.selections).toEqual([{ path: "src/a.ts", start: 2, end: 4 }]);
+    expect(parseImageTags(sel.body)).toEqual({
+      body: "explain",
+      images: [{ index: 1, path: undefined }],
+    });
+  });
+});
+
+describe("parseImageTags", () => {
+  const deps = { readFile: () => "", extName: (p: string) => (p.includes(".") ? p.slice(p.lastIndexOf(".")) : "") };
+
+  it("passes plain text through untouched", () => {
+    expect(parseImageTags("just a message")).toEqual({ body: "just a message", images: [] });
+  });
+
+  it("round-trips the current wire shape (text first, trailing tag lines)", () => {
+    const img = makeImageChip("/staging/a.png", 1, "image/png");
+    const { text } = buildPromptWithImages(
+      "what is this?",
+      [img],
+      [{ index: 1, mimeType: "image/png", data: "AA" }],
+      deps,
+    );
+    expect(parseImageTags(text)).toEqual({
+      body: "what is this?",
+      images: [{ index: 1, path: undefined }],
+    });
+  });
+
+  it("recovers the origin path from a disk-import tag", () => {
+    const out = parseImageTags("compress this\n\n[Image #2] (assets/hero.png)");
+    expect(out.body).toBe("compress this");
+    expect(out.images).toEqual([{ index: 2, path: "assets/hero.png" }]);
+  });
+
+  it("strips the do-not-Read hint from a pasted-image tag (current wire)", () => {
+    const out = parseImageTags(
+      "what is this?\n\n[Image #1] (attached inline — already visible to you; do not read it from disk)",
+    );
+    expect(out).toEqual({ body: "what is this?", images: [{ index: 1, path: undefined }] });
+  });
+
+  it("strips the do-not-Read hint but keeps the path on a disk-import tag (current wire)", () => {
+    const out = parseImageTags(
+      "compress this\n\n[Image #2] (assets/hero.png — attached inline; act on the path if needed, but do not Read it)",
+    );
+    expect(out).toEqual({ body: "compress this", images: [{ index: 2, path: "assets/hero.png" }] });
+  });
+
+  it("round-trips a disk-import tag whose filename contains parentheses", () => {
+    // Browser-download dedup names — `screenshot (1).png` — put a `)` inside
+    // the path; the tag's close paren must resolve to the LAST one on the line.
+    const origin = "shots/screenshot (1).png";
+    const img = makeImageChip("/staging/s.png", 1, "image/png", origin);
+    const { text } = buildPromptWithImages(
+      "describe it",
+      [img],
+      [{ index: 1, mimeType: "image/png", data: "AA", relPath: origin }],
+      deps,
+    );
+    expect(parseImageTags(text)).toEqual({
+      body: "describe it",
+      images: [{ index: 1, path: origin }],
+    });
+  });
+
+  it("leaves a literal empty-parens tag shape in the body", () => {
+    // buildPromptWithImages never emits `()` — that's the user's own text.
+    const body = "describe\n\n[Image #1] ()";
+    expect(parseImageTags(body)).toEqual({ body, images: [] });
+  });
+
+  it("collects multiple trailing tag lines in order", () => {
+    const out = parseImageTags("compare\n\n[Image #1]\n[Image #3] (a b/c.png)");
+    expect(out.body).toBe("compare");
+    expect(out.images).toEqual([
+      { index: 1, path: undefined },
+      { index: 3, path: "a b/c.png" },
+    ]);
+  });
+
+  it("strips the legacy leading tag lines (first-build wire)", () => {
+    const out = parseImageTags("[Image #1]\n[Image #2]\n\ndescribe both");
+    expect(out.body).toBe("describe both");
+    expect(out.images.map((i: { index: number }) => i.index)).toEqual([1, 2]);
+  });
+
+  it("strips the legacy single-image inline prefix", () => {
+    const out = parseImageTags("[Image #1] what is this?");
+    expect(out.body).toBe("what is this?");
+    expect(out.images).toEqual([{ index: 1, path: undefined }]);
+  });
+
+  it("leaves a tag-looking string in the MIDDLE of the body alone", () => {
+    const body = "the TUI shows [Image #1] before the text\n\nsee?";
+    expect(parseImageTags(body)).toEqual({ body, images: [] });
+  });
+
+  it("leaves a tag inside a fenced code block alone", () => {
+    const body = "explain:\n```\n[Image #1]\n```\ntrailing words";
+    expect(parseImageTags(body)).toEqual({ body, images: [] });
+  });
+
+  it("handles a tags-only body (image sent with no text)", () => {
+    expect(parseImageTags("[Image #1]")).toEqual({
+      body: "",
+      images: [{ index: 1, path: undefined }],
+    });
   });
 });
 

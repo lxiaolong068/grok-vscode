@@ -9,9 +9,10 @@
   FIRST — those stay user-initiated), then runs the gate and ships:
 
     1. assert on `main`
-    2. tsc --noEmit + npm test       (skip with -NoTest)
+    2. tsc --noEmit + npm test       (skip all gating with -NoTest)
+       + npm run test:live           (real grok — mandatory gate; skip with -SkipLive)
     3. assert tag vX.Y.Z is free     (bump the version if it isn't)
-    4. npm run package               -> grok-vscode-phuryn-X.Y.Z.vsix
+    4. npm run package               -> grok-coder-X.Y.Z.vsix
     5. commit the working tree        (message from -MessageFile / -Message / default)
     6. push main
     7. annotated tag vX.Y.Z + push
@@ -33,6 +34,7 @@ param(
   [string]$Message,
   [string]$MessageFile,
   [switch]$NoTest,
+  [switch]$SkipLive,
   [switch]$DryRun
 )
 
@@ -68,13 +70,23 @@ if ($branch -ne "main") { throw "Not on main (on '$branch'). Releases are direct
 if (-not $NoTest) {
   Run "tsc --noEmit"  { npx tsc -p . --noEmit }
   Run "npm test"      { npm test }
+  # The real-grok suite is a mandatory part of the release gate (CLAUDE.md § Publishing).
+  # It spawns the actual CLI, so it can only run where grok is logged in — hence the
+  # explicit -SkipLive escape hatch, but the DEFAULT is to run it so it can't be
+  # silently forgotten under release pressure. A live FAIL (non-zero exit) aborts the
+  # release; a SKIP inside the suite (no subscription, grok declined to delegate) is exit 0.
+  if (-not $SkipLive) {
+    Run "npm run test:live (real grok)" { npm run test:live }
+  } else {
+    Step "SKIPPING real-grok tests (-SkipLive) - the release gate is WEAKER; run 'npm run test:live' by hand first"
+  }
 }
 
 # 3. tag must be free (a collision means the version wasn't bumped)
 if (git tag --list $tag) { throw "Tag $tag already exists - bump package.json/changelog first." }
 
 # 4. build the vsix that will be attached to the release
-$vsix = "grok-vscode-phuryn-$version.vsix"
+$vsix = "grok-coder-$version.vsix"
 Run "npm run package" { npm run package }
 if (-not (Test-Path $vsix)) { throw "Expected $vsix but it wasn't produced." }
 

@@ -33,18 +33,30 @@ import {
 import { TerminalManager } from "./terminal-manager";
 import {
   FileChip,
+  MAX_VISION_IMAGE_BYTES,
   clearImplicitChips,
+  consumeChips,
+  extFromMime,
+  isImageChip,
+  isImplicitChip,
+  isVisionImagePath,
+  isVisionMime,
   makeExplicitChip,
+  makeImageChip,
   makeImplicitChip,
+  mimeFromPath,
   removeChip,
   toggleChip,
 } from "./chips";
-import { buildPrompt } from "./prompt-builder";
+import { buildPromptWithImages, type PromptImageInput } from "./prompt-builder";
+import { matchSlashCommand } from "./slash-filter";
+import { configForcesAlwaysApprove } from "./grok-config";
 import { parseFileRef, shouldReadFileInline } from "./file-ref";
 import { pickRejectOption, shouldRejectPermission } from "./plan-gate";
 import { appendPlanEntry, decideRestoreState } from "./plan-restore";
 import { planReviewFileBaseName, sanitizePlanReviewFilePart } from "./plan-review";
 import { GROK_PRIMER, isPrimerText } from "./grok-primer";
+import { HostMsg, WebviewMsg } from "./protocol";
 import {
   SessionListEntry,
   SessionMetaOverrides,
@@ -60,45 +72,8 @@ import {
   sessionsDirFor,
 } from "./sessions";
 
-type WebviewMsg =
-  | { type: "ready" }
-  | { type: "send"; text: string; chips: FileChip[] }
-  | { type: "newSession" }
-  | { type: "cancel" }
-  | { type: "pickModel" }
-  | { type: "setMode"; modeId: "agent" | "plan" | "yolo" }
-  | { type: "removeChip"; id: string }
-  | { type: "toggleChip"; id: string }
-  | { type: "openFile"; path: string }
-  | { type: "openUrl"; url: string }
-  | { type: "openDiff"; path: string; oldText: string; newText: string; requestId?: number | string }
-  | { type: "exportExpr"; action: string; kind: string; current?: string; svg?: string; png?: string; svgDark?: string; svgLight?: string }
-  | { type: "setEffort"; level: string }
-  | { type: "openGlobalConfig" }
-  | { type: "openProjectConfig" }
-  | { type: "runMcpList" }
-  | { type: "showLogs" }
-  | { type: "setShowThinking"; value: boolean }
-  | { type: "dropFile"; path: string; shift: boolean }
-  | { type: "permissionAnswer"; requestId: number | string; optionId: string }
-  | { type: "exitPlanAnswer"; requestId: number | string; verdict: "approved" | "abandoned" | "rejected"; comment?: string }
-  | { type: "questionAnswer"; requestId: number | string; answers?: Record<string, string>; annotations?: Record<string, { notes?: string; preview?: string }> }
-  | { type: "questionCancel"; requestId: number | string }
-  | { type: "setModel"; modelId: string }
-  | { type: "runInstallCmd" }
-  | { type: "runGrokLogin" }
-  | { type: "logout" }
-  | { type: "checkGrokUpdate" }
-  | { type: "updateGrok" }
-  | { type: "recheckConnection" }
-  | { type: "listSessions"; offset?: number; limit?: number; query?: string }
-  | { type: "resumeSession"; id: string }
-  | { type: "renameSession"; id: string; name: string }
-  | { type: "deleteSession"; id: string; name?: string }
-  | { type: "clearAllSessions" }
-  | { type: "pickFile" }
-  | { type: "voiceStart" }
-  | { type: "voiceStop" };
+// HostMsg (host -> webview) and WebviewMsg (webview -> host) both live in
+// src/protocol.ts — single source of truth for the message contract.
 
 const SESSION_META_KEY = "grok.sessionMeta";
 /** globalState key for the anonymous per-install telemetry GUID (survives updates). */
@@ -203,6 +178,8 @@ export class GrokSidebar implements vscode.WebviewViewProvider {
   private sweptEmptySessions = false;
   private output: vscode.OutputChannel;
   private chips: FileChip[] = [];
+  /** Attachment-staging ops still in flight — see trackAttach. */
+  private readonly pendingAttach = new Set<Promise<void>>();
   private editorWatcher?: vscode.Disposable;
   private terminalManager = new TerminalManager();
   private voiceRecorder = new VoiceRecorder();
@@ -247,6 +224,7 @@ export class GrokSidebar implements vscode.WebviewViewProvider {
     context.subscriptions.push(
       vscode.workspace.registerTextDocumentContentProvider(GROK_DIFF_SCHEME, this.diffProvider),
     );
+    void this.sweepImageStaging();
   }
 
   resolveWebviewView(view: vscode.WebviewView): void {
@@ -263,7 +241,15 @@ export class GrokSidebar implements vscode.WebviewViewProvider {
       ],
     };
     view.webview.html = this.getHtml(view.webview);
-    view.webview.onDidReceiveMessage((m: WebviewMsg) => this.onMessage(m));
+    // Message handlers run async; without this catch a throw (e.g. an fs error
+    // in an image-attach path) becomes a silent unhandled rejection.
+    view.webview.onDidReceiveMessage((m: WebviewMsg) => {
+      void this.onMessage(m).catch((e) => {
+        const msg = (e as Error)?.message ?? String(e);
+        this.output.appendLine(`[webview] ${m.type} failed: ${msg}`);
+        void vscode.window.showErrorMessage(`Grok: ${m.type} failed — ${msg}`);
+      });
+    });
     this.watchActiveEditor();
     // Periodic idle-TTL sweep over the live-session pool (the LRU cap is enforced
     // eagerly on each new start; this catches sessions that simply went stale).
@@ -286,6 +272,11 @@ export class GrokSidebar implements vscode.WebviewViewProvider {
       }
       if (e.affectsConfiguration("grok.showThinking")) {
         this.postShowThinking();
+      }
+      if (e.affectsConfiguration("grok.includeActiveFileByDefault")) {
+        // Apply the toggle immediately: disabling removes a visible context
+        // chip right away (not on the next editor event), enabling shows it.
+        this.refreshImplicitChip(true);
       }
     });
   }
@@ -434,6 +425,47 @@ See design doc for the full state machine diagram.`;
 
   private postMode(): void {
     this.post({ type: "modeChanged", modeId: this.displayMode() });
+  }
+
+  /** Whether grok's config.toml forces always-approve (#31). Project
+   *  `.grok/config.toml` overrides global `~/.grok/config.toml`. */
+  private configForcesAutoApprove(): boolean {
+    const readSafe = (p?: string): string | undefined => {
+      if (!p) return undefined;
+      try {
+        return fs.readFileSync(p, "utf8");
+      } catch {
+        return undefined;
+      }
+    };
+    const home = process.env.HOME || process.env.USERPROFILE || "";
+    const globalPath = home ? path.join(home, ".grok", "config.toml") : undefined;
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const projectPath = cwd ? path.join(cwd, ".grok", "config.toml") : undefined;
+    return configForcesAlwaysApprove({ project: readSafe(projectPath), global: readSafe(globalPath) });
+  }
+
+  private alwaysApproveNoticeShown = false;
+
+  /** Tell the user once per activation that always-approve is set globally. */
+  private noticeAlwaysApproveOnce(): void {
+    if (this.alwaysApproveNoticeShown) return;
+    this.alwaysApproveNoticeShown = true;
+    const OPEN = "Open config.toml";
+    void vscode.window
+      .showInformationMessage(
+        'Grok: "always-approve" is set in your grok config.toml, so tool actions are auto-approved for every session (CLI and extension). The mode shows "Auto accept" to reflect this — the extension can\'t override a global config setting per-session.',
+        OPEN,
+      )
+      .then((pick) => {
+        if (pick !== OPEN) return;
+        const home = process.env.HOME || process.env.USERPROFILE || "";
+        if (!home) return;
+        void vscode.commands.executeCommand(
+          "vscode.open",
+          vscode.Uri.file(path.join(home, ".grok", "config.toml")),
+        );
+      });
   }
 
   /** Toggle the client-enforced plan gate and keep the live client in sync. Only
@@ -1264,7 +1296,11 @@ See design doc for the full state machine diagram.`;
       vscode.workspace.getConfiguration("grok").get<string>("defaultMode", ""),
       !!resumeId,
     );
-    session.autoApprove = rememberedYolo;
+    // grok's `permission_mode = "always-approve"` (config.toml) auto-approves
+    // server-side and is invisible over ACP — detect it so the button shows
+    // "Auto accept" instead of a misleading "Agent" (#31).
+    const configAutoApprove = this.configForcesAutoApprove();
+    session.autoApprove = rememberedYolo || configAutoApprove;
     session.planActive = false;
     session.afterTurn = undefined;
     session.hasHistory = false;
@@ -1280,7 +1316,8 @@ See design doc for the full state machine diagram.`;
     session.titleGenerated = false;
     session.firstUserMessageForTitle = undefined;
     session.priming = true;
-    this.emit(session, { type: "modeChanged", modeId: rememberedYolo ? "yolo" : "agent" });
+    this.emit(session, { type: "modeChanged", modeId: session.autoApprove ? "yolo" : "agent" });
+    if (configAutoApprove) this.noticeAlwaysApproveOnce();
     if (resumeId) this.emit(session, { type: "clearMessages" });
 
     // Lock the composer (spinner, disabled) for the session-start window —
@@ -1428,6 +1465,12 @@ See design doc for the full state machine diagram.`;
       if (!session.inUserMessage) {
         session.userMessageCount += 1;
         session.inUserMessage = true;
+      }
+      // Re-seed the session-scoped [Image #N] counter from replayed prompts so
+      // images attached after a restore keep monotonically increasing tags.
+      for (const m of text.matchAll(/\[Image #(\d+)\]/g)) {
+        const n = Number(m[1]);
+        if (n > session.imageCounter) session.imageCounter = n;
       }
       this.emit(session, { type: "userMessageChunk", text });
     });
@@ -1641,6 +1684,21 @@ See design doc for the full state machine diagram.`;
       }
       if (gen !== session.gen) { client.dispose(); session.client = undefined; return undefined; }
 
+      // Configured default not in the CLI list (or set_model failed and we fell
+      // back): surface a one-shot warning so the user can fix grok.defaultModel
+      // instead of silently running on the CLI default (upstream 1.4.31 / #33).
+      if (defaultModel && client.currentModelId && client.currentModelId !== defaultModel) {
+        const hasModel = client.availableModels.some((m) => m.modelId === defaultModel);
+        if (!hasModel) {
+          this.output.appendLine(
+            `[startup] Default model '${defaultModel}' is not available in the CLI. Using '${client.currentModelId}' instead.`,
+          );
+          vscode.window.showWarningMessage(
+            `Grok default model '${defaultModel}' is not available. Falling back to '${client.currentModelId}'. Please update your 'grok.defaultModel' setting.`,
+          );
+        }
+      }
+
       // Session is live — unlock the composer now. The "system prompt" (primer)
       // that teaches grok the plan-verdict protocol fires here EAGERLY and in the
       // BACKGROUND (not awaited), on a new OR restored session, so the composer is
@@ -1711,7 +1769,7 @@ See design doc for the full state machine diagram.`;
         this.postInitialState();
         break;
       case "send":
-        await this.handleSend(msg.text, msg.chips);
+        await this.handleSend(msg.text, msg.bare === true);
         break;
       case "newSession":
         await this.newFocusedSession();
@@ -1725,10 +1783,16 @@ See design doc for the full state machine diagram.`;
       case "setMode":
         await this.setMode(msg.modeId);
         break;
-      case "removeChip":
+      case "removeChip": {
+        // A removed image chip's staged file has no other reference — reclaim it.
+        const removed = this.chips.find((c) => c.id === msg.id);
+        if (removed && isImageChip(removed)) {
+          void fs.promises.unlink(removed.path).catch(() => {});
+        }
         this.chips = removeChip(this.chips, msg.id);
         this.postChips();
         break;
+      }
       case "toggleChip":
         this.chips = toggleChip(this.chips, msg.id);
         this.postChips();
@@ -1767,7 +1831,10 @@ See design doc for the full state machine diagram.`;
         await this.exportExpr(msg);
         break;
       case "dropFile":
-        this.addDroppedFile(msg.path, msg.shift);
+        await this.trackAttach(this.addDroppedFile(msg.path, msg.shift));
+        break;
+      case "pasteImage":
+        await this.trackAttach(this.addPastedImage(msg.data, msg.mimeType));
         break;
       case "permissionAnswer":
         this.focused.client?.respondPermission(msg.requestId, msg.optionId);
@@ -1921,7 +1988,7 @@ See design doc for the full state machine diagram.`;
         await this.clearAllSessions();
         break;
       case "pickFile":
-        await this.pickFileFromComputer();
+        await this.trackAttach(this.pickFileFromComputer());
         break;
       case "voiceStart":
         await this.handleVoiceStart();
@@ -2212,7 +2279,15 @@ See design doc for the full state machine diagram.`;
     });
     if (!picked || picked.length === 0) return;
     for (const uri of picked) {
-      this.addDroppedFile(uri.fsPath, false);
+      try {
+        await this.addDroppedFile(uri.fsPath, false);
+      } catch (e) {
+        // Per-file: one unreadable pick must not abort the rest of a multi-select.
+        this.output.appendLine(`[image] could not attach ${uri.fsPath}: ${(e as Error).message}`);
+        void vscode.window.showErrorMessage(
+          `Grok: could not attach ${path.basename(uri.fsPath)} — ${(e as Error).message}`,
+        );
+      }
     }
     this.reveal();
   }
@@ -2668,14 +2743,99 @@ See design doc for the full state machine diagram.`;
     return vscode.Uri.joinPath(dir, `${stem}-${Date.now()}${ext}`);
   }
 
-  private addDroppedFile(absPath: string, shiftHeld: boolean): void {
+  /** Track an in-flight attachment-staging op (paste / drop / pick). */
+  private trackAttach(op: Promise<void>): Promise<void> {
+    this.pendingAttach.add(op);
+    const done = () => { this.pendingAttach.delete(op); };
+    void op.then(done, done);
+    return op;
+  }
+
+  /**
+   * Session-NEUTRAL staging dir for images waiting in the composer. Not the grok
+   * session dir — chips outlive sessions and empty-session cleanup would kill
+   * a pasted screenshot before it was ever sent.
+   */
+  private imageStagingDir(): string {
+    return path.join(this.context.globalStorageUri.fsPath, "image-staging");
+  }
+
+  /** Delete staged images older than 7 days. */
+  private async sweepImageStaging(): Promise<void> {
+    const dir = this.imageStagingDir();
+    try {
+      const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+      for (const name of await fs.promises.readdir(dir)) {
+        const p = path.join(dir, name);
+        try {
+          if ((await fs.promises.stat(p)).mtimeMs < cutoff) await fs.promises.unlink(p);
+        } catch { /* raced or locked — next sweep gets it */ }
+      }
+    } catch { /* staging dir doesn't exist yet */ }
+  }
+
+  private async stageImageAttachment(
+    bytes: Buffer,
+    mimeType: string,
+    originRelPath?: string,
+  ): Promise<void> {
+    const dir = this.imageStagingDir();
+    await fs.promises.mkdir(dir, { recursive: true });
+    const absPath = path.join(dir, `image-${randomUUID()}${extFromMime(mimeType)}`);
+    await fs.promises.writeFile(absPath, bytes);
+    const imageIndex = ++this.focused.imageCounter;
+    this.chips.push(makeImageChip(absPath, imageIndex, mimeType, originRelPath));
+    this.postChips();
+  }
+
+  private async addPastedImage(base64: string, mimeType: string): Promise<void> {
+    try {
+      if (!isVisionMime(mimeType)) {
+        void vscode.window.showErrorMessage(
+          `Grok: unsupported image type ${mimeType} — use PNG, JPEG, GIF, or WebP.`,
+        );
+        return;
+      }
+      const bytes = Buffer.from(base64, "base64");
+      if (bytes.length === 0) return;
+      if (bytes.length > MAX_VISION_IMAGE_BYTES) {
+        void vscode.window.showErrorMessage("Grok: pasted image exceeds the 20 MiB vision limit.");
+        return;
+      }
+      await this.stageImageAttachment(bytes, mimeType);
+      this.reveal();
+    } catch (e) {
+      this.output.appendLine(`[image] paste failed: ${(e as Error).message}`);
+      void vscode.window.showErrorMessage(
+        `Grok: could not attach the pasted image — ${(e as Error).message}`,
+      );
+    }
+  }
+
+  private async importImageFromDisk(srcPath: string): Promise<boolean> {
+    const stat = await fs.promises.stat(srcPath);
+    if (!stat.isFile() || stat.size === 0 || stat.size > MAX_VISION_IMAGE_BYTES) return false;
+    const bytes = await fs.promises.readFile(srcPath);
+    const uri = vscode.Uri.file(srcPath);
+    const rel = vscode.workspace.asRelativePath(uri);
+    const originRelPath = rel !== srcPath && rel !== uri.fsPath ? rel : undefined;
+    await this.stageImageAttachment(bytes, mimeFromPath(srcPath), originRelPath);
+    return true;
+  }
+
+  private async addDroppedFile(absPath: string, shiftHeld: boolean): Promise<void> {
     if (!fs.existsSync(absPath)) return;
+    if (!shiftHeld && isVisionImagePath(absPath)) {
+      try {
+        if (await this.importImageFromDisk(absPath)) return;
+      } catch (e) {
+        this.output.appendLine(`[image] import failed for ${absPath}: ${(e as Error).message}`);
+      }
+      // Oversized / unreadable-as-image → fall through to a plain path chip.
+    }
     const uri = vscode.Uri.file(absPath);
     const relPath = vscode.workspace.asRelativePath(uri);
     if (shiftHeld) {
-      // Only read the whole file (to count lines for an inline selection) when
-      // it's small enough not to freeze the host thread. Large files fall back
-      // to a plain no-selection chip.
       let totalLines: number | undefined;
       try {
         if (shouldReadFileInline(fs.statSync(absPath).size)) {
@@ -2695,23 +2855,79 @@ See design doc for the full state machine diagram.`;
     this.postChips();
   }
 
-  private async handleSend(text: string, chips: FileChip[]): Promise<void> {
+  private async handleSend(text: string, bare = false): Promise<void> {
     const client = await this.ensureClient();
     if (!client) return;
     const session = this.focused;
     const gen = session.gen;
 
-    const finalPrompt = buildPrompt(text, chips, {
-      readFile: (p) => fs.readFileSync(p, "utf8"),
-      extName: (p) => path.extname(p),
-    });
+    // Settle in-flight attachment staging so chips make THIS send.
+    const staging = [...this.pendingAttach];
+    if (staging.length) {
+      await Promise.allSettled(staging);
+      if (gen !== session.gen) return;
+    }
 
-    this.chips = [];
-    this.postChips();
+    // Snapshot the HOST's chips — `bare` sends (gear /compact) carry no attachments.
+    const chips = bare ? [] : [...this.chips];
+
+    // Pre-read every visible image BEFORE clear/send so a dangling [Image #N]
+    // tag never goes out without its block.
+    const images: PromptImageInput[] = [];
+    for (const chip of chips) {
+      if (chip.hidden || !isImageChip(chip)) continue;
+      try {
+        const bytes = await fs.promises.readFile(chip.path);
+        if (bytes.length === 0) throw new Error("file is empty");
+        images.push({
+          index: chip.imageIndex!,
+          mimeType: chip.mimeType ?? "image/png",
+          data: bytes.toString("base64"),
+          relPath: chip.originRelPath,
+        });
+      } catch (e) {
+        if (gen !== session.gen) return;
+        this.emit(session, {
+          type: "agentError",
+          text: `Could not read ${chip.relPath} (${(e as Error).message}). Remove the attachment and try again.`,
+        });
+        return;
+      }
+    }
+    if (gen !== session.gen) return;
+
+    // Leading context knocks slash commands off position 0 — flip order when
+    // the typed text is a confirmed CLI slash command (see research/compact.md).
+    const slashCommand = matchSlashCommand(
+      text,
+      client.availableCommands.map((c) => c.name),
+    );
+
+    const { blocks: promptBlocks } = buildPromptWithImages(
+      text,
+      chips,
+      images,
+      {
+        readFile: (p) => fs.readFileSync(p, "utf8"),
+        extName: (p) => path.extname(p),
+      },
+      slashCommand != null,
+    );
+
+    if (bare) {
+      this.postChips();
+    } else {
+      this.chips = consumeChips(this.chips, chips);
+      this.refreshImplicitChip(true);
+    }
+    for (const chip of chips) {
+      if (isImageChip(chip)) void fs.promises.unlink(chip.path).catch(() => {});
+    }
 
     const isFirstSend = !session.hasHistory;
     session.hasHistory = true;
     if (isFirstSend) {
+      // Image-only first message: leave title empty so grok's summary can show.
       session.firstUserMessageForTitle = text;
       // One `session_start` per session, on the first real user message — never
       // the primer (that takes a separate prompt path that doesn't set hasHistory).
@@ -2732,8 +2948,12 @@ See design doc for the full state machine diagram.`;
       // indicator covers the gap. If the eager primer failed, this retries it.
       await this.ensurePrimed(client, session, gen);
       if (gen !== session.gen) return;
-      const meta = await client.prompt(finalPrompt);
+      const meta = await client.prompt(promptBlocks);
       if (gen !== session.gen) return; // session was switched mid-turn
+      if (slashCommand === "compact") {
+        // Native /compact streams no agent content — paint a live-only confirm.
+        this.emit(session, { type: "messageChunk", text: "Compacted." });
+      }
       // Skip agentEnd if a verdict was clicked mid-turn (afterTurn is queued).
       // Otherwise busy clears here, then the user could send during the brief
       // gap before afterTurn's own client.prompt starts. afterTurn emits its
@@ -2743,6 +2963,12 @@ See design doc for the full state machine diagram.`;
         this.setStatus(session, "done");
       }
       this.maybeGenerateTitle(session);
+      if (slashCommand === "compact") {
+        // Compact can fold the primer away — re-prime for plan-verdict protocol.
+        session.primed = false;
+        session.primingPromise = undefined;
+        void this.ensurePrimed(client, session, gen);
+      }
     } catch (err) {
       if (gen !== session.gen) return; // prompt rejected because we disposed the old client — don't leak the error into the new session
       const e = err as any;
@@ -2786,9 +3012,8 @@ See design doc for the full state machine diagram.`;
       extVersion: (this.context.extension.packageJSON as { version?: string })?.version ?? "",
       showThinking: cfg.get("showThinking", false),
     });
-    if (cfg.get<boolean>("includeActiveFileByDefault", true)) {
-      this.addActiveEditorChip();
-    }
+    // Sync the active-editor context chip into the fresh webview.
+    this.refreshImplicitChip(true);
     this.postVoiceConfigured();
     // Sweep stale empty primer sessions once the first session is live (so the
     // newly-focused session is excluded from the sweep).
@@ -2817,7 +3042,7 @@ See design doc for the full state machine diagram.`;
     "messageChunk", "userMessageChunk", "thoughtChunk", "toolCall", "toolCallUpdate", "xaiNotification",
   ]);
 
-  private post(message: any): void {
+  private post(message: HostMsg): void {
     if (this.focused.suppressContent && GrokSidebar.SUPPRESS_TYPES.has(message.type)) return;
     if (this.focused.suppressPlanReject && GrokSidebar.PLAN_REJECT_SUPPRESS.has(message.type)) return;
     this.view?.webview.postMessage(message);
@@ -2834,7 +3059,7 @@ See design doc for the full state machine diagram.`;
    * the webview until they're focused. (Pool-of-1 today: session is always the
    * focused one, so this is behaviorally identical to `post`.)
    */
-  private emit(session: Session, message: any): void {
+  private emit(session: Session, message: HostMsg): void {
     if (session.suppressContent && GrokSidebar.SUPPRESS_TYPES.has(message.type)) return;
     if (session.suppressPlanReject && GrokSidebar.PLAN_REJECT_SUPPRESS.has(message.type)) return;
     if (message.type === "clearMessages") session.buffer = [];
@@ -3120,21 +3345,58 @@ See design doc for the full state machine diagram.`;
 
   private watchActiveEditor(): void {
     this.editorWatcher?.dispose();
-    this.editorWatcher = vscode.window.onDidChangeActiveTextEditor(() => {
-      const includeActive = vscode.workspace
-        .getConfiguration("grok")
-        .get<boolean>("includeActiveFileByDefault", true);
-      if (!includeActive) return;
-      this.chips = clearImplicitChips(this.chips);
-      this.addActiveEditorChip();
-    });
+    this.editorWatcher = vscode.Disposable.from(
+      vscode.window.onDidChangeActiveTextEditor(() => this.refreshImplicitChip()),
+      vscode.window.onDidChangeTextEditorSelection((e) => {
+        // Split editors can hold several TextEditors on one document — only the
+        // active one's selection drives the context chip.
+        if (e.textEditor !== vscode.window.activeTextEditor) return;
+        this.refreshImplicitChip();
+      }),
+    );
   }
 
-  private addActiveEditorChip(): void {
+  /** Mirror the active editor (file + live selection line range) onto the
+   *  implicit context chip. No-op when nothing changed (unless forcePost). */
+  private refreshImplicitChip(forcePost = false): void {
+    const includeActive = vscode.workspace
+      .getConfiguration("grok")
+      .get<boolean>("includeActiveFileByDefault", true);
+    const prev = this.chips.find(isImplicitChip);
     const editor = vscode.window.activeTextEditor;
-    if (!editor || editor.document.uri.scheme !== "file") return;
+
+    if (!includeActive || !editor || editor.document.uri.scheme !== "file") {
+      this.chips = clearImplicitChips(this.chips);
+      if (prev || forcePost) this.postChips();
+      return;
+    }
+
+    const absPath = editor.document.uri.fsPath;
     const relPath = vscode.workspace.asRelativePath(editor.document.uri);
-    this.chips.push(makeImplicitChip(editor.document.uri.fsPath, relPath));
+    let selStart: number | undefined;
+    let selEnd: number | undefined;
+    if (!editor.selection.isEmpty) {
+      selStart = editor.selection.start.line + 1;
+      selEnd = editor.selection.end.line + 1;
+    }
+
+    if (
+      prev &&
+      prev.path === absPath &&
+      prev.relPath === relPath &&
+      prev.selectionStart === selStart &&
+      prev.selectionEnd === selEnd
+    ) {
+      if (forcePost) this.postChips();
+      return;
+    }
+
+    const next = makeImplicitChip(absPath, relPath, selStart, selEnd);
+    // Selection change on the SAME file keeps the user's eye-off choice;
+    // switching files resets it.
+    if (prev && prev.path === absPath) next.hidden = prev.hidden;
+    this.chips = clearImplicitChips(this.chips);
+    this.chips.push(next);
     this.postChips();
   }
 

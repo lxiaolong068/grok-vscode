@@ -397,6 +397,38 @@ describe("mode picker (the plan-gate entry path)", () => {
   });
 });
 
+describe("context donut (token usage)", () => {
+  const boot = () => {
+    const h = bootWebview();
+    dispatch(h.window, {
+      type: "session",
+      sessionId: "s1",
+      currentModelId: "grok-build",
+      models: [{ modelId: "grok-build", name: "Grok Build", totalContextTokens: 100000 }],
+    });
+    return h;
+  };
+
+  it("accepts totalTokens 0 — a native /compact resets the count, the donut must not freeze", () => {
+    const { window, doc } = boot();
+    dispatch(window, { type: "promptComplete", meta: { totalTokens: 32000 } });
+    expect($(doc, "donut-label").textContent).toBe("32K/100K");
+    // The compact turn's response reports totalTokens: 0 (verified against grok
+    // 0.2.87 in research/compact.md). The old truthy gate swallowed it and the
+    // donut kept showing the pre-compact value — "did /compact even work?".
+    dispatch(window, { type: "promptComplete", meta: { totalTokens: 0 } });
+    expect($(doc, "donut-label").textContent).toBe("0K/100K");
+  });
+
+  it("still ignores a promptComplete that carries no totalTokens at all", () => {
+    const { window, doc } = boot();
+    dispatch(window, { type: "promptComplete", meta: { totalTokens: 32000 } });
+    dispatch(window, { type: "promptComplete", meta: {} });
+    dispatch(window, { type: "promptComplete" });
+    expect($(doc, "donut-label").textContent).toBe("32K/100K");
+  });
+});
+
 describe("gear settings lock (model + effort disabled while busy / priming)", () => {
   const models = [
     { modelId: "grok-build", name: "Grok Build" },
@@ -622,6 +654,71 @@ describe("Grokking… indicator (waiting placeholder)", () => {
     expect(extText.startsWith("2025-07-14")).toBe(true); // filename, not the path
     expect(extText).not.toContain("\\");
     expect(extText).not.toContain("Downloads");
+  });
+
+  it("shows the selected line range on a sent-message chip, like the composer chip", () => {
+    const { window, doc } = bootWebview();
+    dispatch(window, {
+      type: "userMessage",
+      text: "explain these lines",
+      chips: [
+        {
+          id: "implicit:/repo/src/prompt-builder.ts",
+          path: "/repo/src/prompt-builder.ts",
+          relPath: "src/prompt-builder.ts",
+          selectionStart: 60,
+          selectionEnd: 82,
+        },
+        { id: "explicit:1", path: "/repo/src/a.ts", relPath: "src/a.ts", selectionStart: 8, selectionEnd: 8 },
+      ],
+    });
+    const chips = Array.from(doc.querySelectorAll(".msg.user .msg-chip")) as HTMLElement[];
+    const texts = chips.map((c) => c.querySelector("span")!.textContent);
+    // No 20-char JS truncation — the full name + range must survive (ellipsis is CSS).
+    expect(texts).toContain("prompt-builder.ts:60-82");
+    expect(texts).toContain("a.ts:8");
+    const ranged = chips.find((c) => c.querySelector("span")!.textContent === "prompt-builder.ts:60-82")!;
+    expect(ranged.title).toBe("/repo/src/prompt-builder.ts (lines 60-82)");
+    const single = chips.find((c) => c.querySelector("span")!.textContent === "a.ts:8")!;
+    expect(single.title).toBe("/repo/src/a.ts (line 8)");
+  });
+
+  it("rebuilds a replayed selection snippet as a ranged chip, not an inline code block", () => {
+    const { window, doc } = bootWebview();
+    const replayed =
+      "<vscode-context note=\"added by the editor, not typed by the user\">\n" +
+      "Attached file: CLAUDE.md\n" +
+      "</vscode-context>\n\n" +
+      "`src/a.ts` (lines 2-4):\n```ts\nline2\nline3\nline4\n```\n\n" +
+      "what is this";
+
+    dispatch(window, { type: "historyReplay", active: true });
+    dispatch(window, { type: "userMessageChunk", text: replayed });
+    dispatch(window, { type: "historyReplay", active: false });
+
+    const bubble = doc.querySelector(".msg.user") as HTMLElement;
+    expect(bubble.textContent).toContain("what is this");
+    expect(bubble.textContent).not.toContain("line2"); // snippet body → chip, not a code block
+    const texts = Array.from(bubble.querySelectorAll(".msg-chip span")).map((s) => s.textContent);
+    expect(texts).toContain("CLAUDE.md");
+    expect(texts).toContain("a.ts:2-4");
+    const ranged = Array.from(bubble.querySelectorAll(".msg-chip")).find(
+      (c) => c.querySelector("span")!.textContent === "a.ts:2-4",
+    ) as HTMLElement;
+    expect(ranged.title).toBe("src/a.ts (lines 2-4)");
+  });
+
+  it("copies only the user's own words from a restored message, not the context plumbing", () => {
+    const { window, doc } = bootWebview();
+    dispatch(window, { type: "historyReplay", active: true });
+    dispatch(window, {
+      type: "userMessageChunk",
+      text: "`a.ts` (lines 1-1):\n```ts\nconst x = 1;\n```\n\nexplain this",
+    });
+    dispatch(window, { type: "historyReplay", active: false });
+
+    const msg = doc.querySelector(".msg.user") as HTMLElement & { _copyText?: string };
+    expect(msg._copyText).toBe("explain this");
   });
 
   it("is mutually exclusive with the plan-processing indicator (one waiting indicator at a time)", () => {
@@ -1259,5 +1356,99 @@ describe("math / diagram export actions (step b)", () => {
     expect(typeof msg!.svgDark).toBe("string");
     expect(typeof msg!.svgLight).toBe("string");
     expect(msg!.svgDark as string).not.toContain("background:");
+  });
+});
+
+// The composer's active-editor context chip mirrors Claude Code's: full file
+// name (CSS ellipsis handles pathological lengths — no JS truncation), plus a
+// live `:start-end` line-range suffix while the user has an editor selection.
+describe("active-editor context chip in the composer", () => {
+  const implicitChip = (over: Record<string, unknown> = {}) => ({
+    id: "implicit:/ws/vitest.perf.config.ts",
+    path: "/ws/vitest.perf.config.ts",
+    relPath: "vitest.perf.config.ts",
+    hidden: false,
+    ...over,
+  });
+
+  it("shows the full file name — no 10-char JS truncation", () => {
+    const { window, doc } = bootWebview();
+    dispatch(window, { type: "chips", chips: [implicitChip()] });
+    const span = doc.querySelector("#chips .chip span")!;
+    expect(span.textContent).toBe("vitest.perf.config.ts");
+  });
+
+  it("appends the selected line range to the label and tooltip", () => {
+    const { window, doc } = bootWebview();
+    dispatch(window, { type: "chips", chips: [implicitChip({ selectionStart: 8, selectionEnd: 15 })] });
+    const chip = doc.querySelector("#chips .chip") as HTMLElement;
+    expect(chip.querySelector("span")!.textContent).toBe("vitest.perf.config.ts:8-15");
+    expect(chip.getAttribute("title")).toBe("/ws/vitest.perf.config.ts (lines 8-15)");
+  });
+
+  it("labels a single-line selection with one line number", () => {
+    const { window, doc } = bootWebview();
+    dispatch(window, { type: "chips", chips: [implicitChip({ selectionStart: 8, selectionEnd: 8 })] });
+    const chip = doc.querySelector("#chips .chip") as HTMLElement;
+    expect(chip.querySelector("span")!.textContent).toBe("vitest.perf.config.ts:8");
+    expect(chip.getAttribute("title")).toBe("/ws/vitest.perf.config.ts (line 8)");
+  });
+
+  it("escapes HTML in the file name instead of injecting it", () => {
+    const { window, doc } = bootWebview();
+    dispatch(window, {
+      type: "chips",
+      chips: [implicitChip({ relPath: "<img src=x>.ts", path: "/ws/<img src=x>.ts", id: "implicit:/ws/x" })],
+    });
+    const chip = doc.querySelector("#chips .chip") as HTMLElement;
+    expect(chip.querySelector("span")!.textContent).toBe("<img src=x>.ts");
+    expect(chip.querySelector("img")).toBeNull();
+  });
+});
+
+// Opening the panel must land the caret in the input — no first click needed
+// (mirrors Claude Code / Codex). Boot focuses directly (the webview is rebuilt
+// on every re-show); a window "focus" landing on <body> is forwarded to the
+// input, but never stolen from a real control.
+describe("composer input focus (caret ready on open)", () => {
+  it("focuses the input on boot, so typing works without a first click", () => {
+    const { doc } = bootWebview();
+    expect(doc.activeElement).toBe($(doc, "input"));
+  });
+
+  it("forwards window focus that landed on <body> to the input", () => {
+    const { window, doc } = bootWebview();
+    ($(doc, "input") as HTMLTextAreaElement).blur(); // focus falls back to <body>
+    expect(doc.activeElement).toBe(doc.body);
+
+    window.dispatchEvent(new (window as any).Event("focus"));
+    expect(doc.activeElement).toBe($(doc, "input"));
+  });
+
+  it("does not steal focus from a control the user actually focused", () => {
+    const { window, doc } = bootWebview();
+    const btn = $(doc, "history-btn") as HTMLButtonElement;
+    btn.focus();
+
+    window.dispatchEvent(new (window as any).Event("focus"));
+    expect(doc.activeElement).toBe(btn);
+  });
+
+  it("lands the caret in the input on the new-session click", () => {
+    const { window, doc } = bootWebview();
+    const newBtn = $(doc, "new-btn") as HTMLButtonElement;
+    newBtn.focus(); // the click leaves focus on the button
+    click(window, newBtn);
+    expect(doc.activeElement).toBe($(doc, "input"));
+  });
+
+  it("lands the caret in the input on a session swap (clearMessages)", () => {
+    // Both a history-row re-focus and a disk restore reach the webview as the
+    // host's clearMessages; the user just clicked a popover row, so the caret
+    // should end up ready in the box.
+    const { window, doc } = bootWebview();
+    ($(doc, "input") as HTMLTextAreaElement).blur();
+    dispatch(window, { type: "clearMessages" });
+    expect(doc.activeElement).toBe($(doc, "input"));
   });
 });

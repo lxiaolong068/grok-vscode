@@ -68,6 +68,10 @@
     activeAgentRaw: "",
     activeUserEl: null,
     activeUserRaw: "",
+    // Count of clipboard images still being read (FileReader in flight). Send
+    // is held while > 0 so a paste-then-Enter can't race the image onto the
+    // NEXT message — the pasteImage post must reach the host before send does.
+    pendingPaste: 0,
     activeThoughtEl: null,
     activeThoughtHdrEl: null,
     thoughtStartTime: null,
@@ -207,6 +211,7 @@
     eye: `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>`,
     eyeOff: `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" x2="22" y1="2" y2="22"/></svg>`,
     file: `<svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></svg>`,
+    image: `<svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>`,
     cpu: `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M15 2v2"/><path d="M15 20v2"/><path d="M2 15h2"/><path d="M2 9h2"/><path d="M20 15h2"/><path d="M20 9h2"/><path d="M9 2v2"/><path d="M9 20v2"/></svg>`,
     squarePen: `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z"/></svg>`,
     arrowUp: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></svg>`,
@@ -305,7 +310,7 @@
 
   // ---------- markdown ----------
 
-  const { looksLikeFileRef, formatRelativeTime, modelDisplayName, nextMicState, trailingSendPhrase, buildQuestionAnswers, isSubagentToolCall, subagentLabel, shouldStickToBottom, splitMath, stripUnsupportedTex, toolFailureText, parseAttachmentContext } = globalThis.GrokWebviewHelpers;
+  const { looksLikeFileRef, formatRelativeTime, modelDisplayName, nextMicState, trailingSendPhrase, buildQuestionAnswers, isSubagentToolCall, subagentLabel, shouldStickToBottom, splitMath, stripUnsupportedTex, toolFailureText, parseAttachmentContext, parseSelectionBlocks, parseImageTags, isKnownHostMessage } = globalThis.GrokWebviewHelpers;
 
   function escapeAttr(s) {
     return String(s == null ? "" : s)
@@ -1028,7 +1033,7 @@
     // ── Session ───────────────────────────────────────────────────────────
     addSection("Session");
     addGearItem("<span>Compact conversation</span>", () => {
-      vscode.postMessage({ type: "send", text: "/compact", chips: [] });
+      vscode.postMessage({ type: "send", text: "/compact", bare: true });
       closePopovers();
     });
 
@@ -1498,6 +1503,13 @@
   }
 
   function resetForNewSession() {
+    // The caret belongs in the box after any session swap — new session, a
+    // history-row re-focus, a disk restore (all funnel through here via the
+    // host's clearMessages). Guarded on document.hasFocus(): user-initiated
+    // swaps start with a click inside this webview, but a host-initiated clear
+    // (an automatic restart) can arrive while the user is typing in the editor,
+    // and focusing then would yank keyboard focus across panels.
+    if (typeof document.hasFocus !== "function" || document.hasFocus()) input.focus();
     for (const child of Array.from(messagesEl.children)) {
       if (child.id !== "welcome") child.remove();
     }
@@ -1600,14 +1612,28 @@
 
   // A file chip for a user message bubble: basename only (split on both separators
   // so a file outside the workspace shows its name, not its full Windows path),
-  // with the full path on the tooltip. Shared by the live bubble (addMessage) and
-  // the restore path (appendUserChunk, reconstructed from the parsed prompt).
-  function makeMsgChipTag(pathStr) {
+  // with the full path on the tooltip. A selection range rides the label in the
+  // composer chip's format (`name:8-15`, single line `name:8`) — full text kept,
+  // overflow is CSS ellipsis. Shared by the live bubble (addMessage) and the
+  // restore path (appendUserChunk, reconstructed from the parsed prompt).
+  function makeMsgChipTag(pathStr, chip) {
     const tag = document.createElement("span");
     tag.className = "msg-chip";
-    const fileName = pathStr.split(/[\\/]/).pop() || pathStr;
-    tag.innerHTML = ICON.file + `<span>${escapeHtml(truncate(fileName, 20))}</span>`;
-    tag.title = pathStr;
+    const name = chip?.imageIndex != null ? `Image #${chip.imageIndex}` : (pathStr.split(/[\\/]/).pop() || pathStr);
+    const icon = chip?.imageIndex != null ? ICON.image : ICON.file;
+    const hasSel = chip?.selectionStart && chip?.selectionEnd;
+    const range = hasSel
+      ? chip.selectionStart === chip.selectionEnd
+        ? `:${chip.selectionStart}`
+        : `:${chip.selectionStart}-${chip.selectionEnd}`
+      : "";
+    const lineNote = hasSel
+      ? chip.selectionStart === chip.selectionEnd
+        ? ` (line ${chip.selectionStart})`
+        : ` (lines ${chip.selectionStart}-${chip.selectionEnd})`
+      : "";
+    tag.innerHTML = icon + `<span>${escapeHtml(name + range)}</span>`;
+    tag.title = (chip?.originRelPath || chip?.path || pathStr) + lineNote;
     return tag;
   }
 
@@ -1633,7 +1659,7 @@
     if (role === "user" && chips && chips.length > 0) {
       const chipsRow = document.createElement("div");
       chipsRow.className = "msg-chips";
-      for (const chip of chips) chipsRow.appendChild(makeMsgChipTag(chip.relPath));
+      for (const chip of chips) chipsRow.appendChild(makeMsgChipTag(chip.relPath, chip));
       contentParent.appendChild(chipsRow);
     }
 
@@ -2321,12 +2347,29 @@
     // The replayed prompt carries the <vscode-context> envelope we sent; strip it
     // back out so the bubble shows the user's own words + filename-only chips (with
     // the full path on hover), matching the live send — not the raw paths inline.
+    // Fenced selection snippets (buildPrompt's output for ranged chips) become
+    // ranged chips (`a.ts:2-4`) the same way, and the [Image #N] tag lines
+    // buildPromptWithImages appended become image chips — each parser only strips
+    // the exact leading/trailing shapes we produce, so a look-alike string in the
+    // middle of the user's own words stays put. The stripped body is also what
+    // the copy button yields: the user's words, not the context plumbing.
     const parsed = parseAttachmentContext(state.activeUserRaw);
-    state.activeUserEl.innerHTML = renderMarkdown(parsed.body);
-    if (parsed.files.length) {
+    const selBlocks = parseSelectionBlocks(parsed.body);
+    const imageTags = parseImageTags(selBlocks.body);
+    state.activeUserEl.innerHTML = renderMarkdown(imageTags.body);
+    const msgEl = state.activeUserEl.closest(".msg");
+    if (msgEl) msgEl._copyText = imageTags.body;
+    const chipTags = [
+      ...parsed.files.map((f) => makeMsgChipTag(f)),
+      ...selBlocks.selections.map((s) =>
+        makeMsgChipTag(s.path, { selectionStart: s.start, selectionEnd: s.end })),
+      ...imageTags.images.map((im) =>
+        makeMsgChipTag(`Image #${im.index}`, { imageIndex: im.index, path: im.path })),
+    ];
+    if (chipTags.length) {
       const chipsRow = document.createElement("div");
       chipsRow.className = "msg-chips";
-      for (const f of parsed.files) chipsRow.appendChild(makeMsgChipTag(f));
+      for (const tag of chipTags) chipsRow.appendChild(tag);
       state.activeUserEl.appendChild(chipsRow);
     }
     scrollToBottom();
@@ -3090,8 +3133,10 @@
       if (isUpload) {
         const el = document.createElement("div");
         el.className = "attachment";
-        el.title = chip.path;
-        el.innerHTML = ICON.file;
+        // For a disk-imported image the interesting path is the ORIGINAL file,
+        // not the staged copy the chip's path points at.
+        el.title = chip.originRelPath || chip.path;
+        el.innerHTML = chip.imageIndex != null ? ICON.image : ICON.file;
         const label = document.createElement("span");
         label.textContent = fileName;
         el.appendChild(label);
@@ -3107,9 +3152,21 @@
       }
       const el = document.createElement("div");
       el.className = "chip" + (chip.hidden ? " chip-hidden" : "");
-      el.title = chip.path;
+      // Mirror the live editor selection on the label (`name:8-15`) — the full
+      // name is kept (CSS ellipsis handles pathological lengths, no JS cut).
+      const hasSel = chip.selectionStart && chip.selectionEnd;
+      const range = hasSel
+        ? chip.selectionStart === chip.selectionEnd
+          ? `${chip.selectionStart}`
+          : `${chip.selectionStart}-${chip.selectionEnd}`
+        : "";
+      el.title = chip.path + (hasSel
+        ? (chip.selectionStart === chip.selectionEnd
+          ? ` (line ${chip.selectionStart})`
+          : ` (lines ${chip.selectionStart}-${chip.selectionEnd})`)
+        : "");
       el.innerHTML = (chip.hidden ? ICON.eyeOff : ICON.file) +
-        `<span>${truncate(fileName, 10)}</span>`;
+        `<span>${escapeHtml(range ? `${fileName}:${range}` : fileName)}</span>`;
       el.onclick = () => vscode.postMessage({ type: "toggleChip", id: chip.id });
       chipsEl.appendChild(el);
     }
@@ -3223,7 +3280,13 @@
       vscode.postMessage({ type: "cancel" });
       return;
     }
+    // A clipboard image is still being read — its pasteImage post hasn't
+    // reached the host yet, so sending now would detach it from this message.
+    // The read settles in milliseconds; the next click/Enter goes through.
+    if (state.pendingPaste > 0) return;
     const text = input.value.trim();
+    // Sendable = typed text or any visible chip (file or image alike — image
+    // chips render as remove-only attachment rows, so they're never hidden).
     if (!text && state.chips.every((c) => c.hidden)) return;
     state.busy = true;
     updateSendButton();
@@ -3233,7 +3296,9 @@
     state.activeThoughtHdrEl = null;
     state.thoughtStartTime = null;
     state.activeToolGroupEl = null;
-    vscode.postMessage({ type: "send", text, chips: state.chips });
+    // Chips are host-owned state (every mutation routes through the host and
+    // comes back via postChips) — the host snapshots its own copy on send.
+    vscode.postMessage({ type: "send", text });
     input.value = "";
     renderInputHighlight();
     slashPopover.hidden = true;
@@ -3350,7 +3415,7 @@
     state.activeThoughtHdrEl = null;
     state.thoughtStartTime = null;
     state.activeToolGroupEl = null;
-    vscode.postMessage({ type: "send", text: t, chips: state.chips });
+    vscode.postMessage({ type: "send", text: t });
   }
 
   // Send the next message dictated while Grok was busy (so you can keep talking
@@ -3701,7 +3766,11 @@
         // turn ends emitting promptComplete; afterTurn's follow-up turn then
         // runs and emits its own agentEnd at the end, which clears busy).
         commitAgentTurn();
-        if (msg.meta?.totalTokens) updateDonut(msg.meta.totalTokens);
+        // != null, not truthy: a native /compact reports totalTokens 0 (context
+        // reset). Swallowing the 0 froze the donut at the pre-compact value —
+        // the "did /compact even work?" report. Zero renders an empty ring
+        // until the next turn reports the real post-compact size.
+        if (msg.meta?.totalTokens != null) updateDonut(msg.meta.totalTokens);
         break;
       case "agentReset": {
         hidePlanProcessing(); // turn is being reset, indicator no longer applies
@@ -3841,6 +3910,17 @@
         else delete state.dots[msg.id];
         if (!historyPopover.hidden) patchSessionDot(msg.id);
         break;
+      default:
+        // No case ran. Either the host posted a type outside the contract (drift
+        // between src/protocol.ts and the webview-helpers.js copy — the sync test
+        // is meant to catch this at CI, this is the runtime backstop) or a known
+        // type is missing its handler. Warn rather than silently swallow it.
+        console.warn(
+          isKnownHostMessage(msg.type)
+            ? "[grok] host message has no handler (missing switch case): " + msg.type
+            : "[grok] unknown host message type (contract drift): " + msg.type,
+        );
+        break;
     }
     // After any step grok takes mid-turn, make sure the chat still shows it's
     // working — never a dead frame while a turn is unfinished (esp. with thinking
@@ -3967,6 +4047,45 @@
     }
   });
 
+  input.addEventListener("paste", (e) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    // Collect image FILES synchronously (getAsFile is sync) so the decision to
+    // suppress the default paste is made before any async work. Raster types
+    // only — the host re-checks, this is just the first gate.
+    const blobs = [];
+    for (const item of items) {
+      if (item.kind !== "file" || !/^image\/(png|jpeg|gif|webp)$/i.test(item.type)) continue;
+      const blob = item.getAsFile();
+      if (blob) blobs.push(blob);
+    }
+    if (blobs.length === 0) return; // plain text (or unsupported) — default paste
+    e.preventDefault();
+    // A mixed clipboard (copy from a web page / Word) carries text alongside
+    // the image; preventDefault killed the text half, so re-insert it manually.
+    const pastedText = e.clipboardData.getData("text/plain");
+    if (pastedText) {
+      const start = input.selectionStart ?? input.value.length;
+      const end = input.selectionEnd ?? start;
+      input.setRangeText(pastedText, start, end, "end");
+      updateSlash();
+      renderInputHighlight();
+    }
+    for (const blob of blobs) {
+      state.pendingPaste += 1;
+      const reader = new FileReader();
+      const settle = () => { state.pendingPaste = Math.max(0, state.pendingPaste - 1); };
+      reader.onerror = settle;
+      reader.onload = () => {
+        const dataUrl = String(reader.result || "");
+        const m = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+        if (m) vscode.postMessage({ type: "pasteImage", mimeType: m[1], data: m[2] });
+        settle();
+      };
+      reader.readAsDataURL(blob);
+    }
+  });
+
   input.addEventListener("input", () => { updateSlash(); renderInputHighlight(); });
   input.addEventListener("scroll", () => {
     if (!inputHighlight) return;
@@ -4029,6 +4148,19 @@
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) closePopovers();
   });
+
+  // Focus the input the moment the panel opens — the caret should already be
+  // blinking in the box before the first click (matches Claude Code / Codex).
+  // The webview is rebuilt on every re-show (no retainContextWhenHidden), so
+  // the boot-time focus covers "reopened" too; the window-focus hook covers
+  // clicking back into a panel that stayed alive. Only claim focus when it
+  // landed on <body> (i.e. nowhere) — a click that focused a real control
+  // (history button, popover row) keeps it.
+  window.addEventListener("focus", () => {
+    const el = document.activeElement;
+    if (!el || el === document.body) input.focus();
+  });
+  input.focus();
 
   initMermaid();
   initMathJax();

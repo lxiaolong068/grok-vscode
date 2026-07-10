@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased (upstream sync)
+
+Synced shared ACP/sidebar surface from upstream **phuryn/grok-build-vscode v1.5.1** (`d128de8`), via path-filtered patch (detached fork — no merge). See [docs/upstream-sync-v1.5.1.md](docs/upstream-sync-v1.5.1.md).
+
+### Added (from upstream 1.4.31–1.5.1)
+
+- **Vision paste/upload** — PNG/JPEG/GIF/WebP as inline ACP image blocks (20 MiB cap); SVG stays a path chip
+- **Live selection on the context chip** (`file.ts:8-15`) and restore-friendly image tags
+- **`src/protocol.ts`** — typed host↔webview message contract; webview mirror + parity test
+- **`src/grok-config.ts`** — read `permission_mode = always-approve` from config.toml
+- **Multi-IDE install scripts** (`CODE_CLI` / `-Cli`, antigravity detection)
+- **CI integration smoke** (`@vscode/test-electron`, `npm run test:integration`)
+
+### Fixed (from upstream)
+
+- **defaultModel set_model failures no longer kill session start** (#33) — try/catch + toast when model missing from CLI list
+- **`/compact` dispatches natively again** — slash leads the text block; post-compact re-primes plan protocol; live “Compacted.” confirm
+- **Plan mode allows read-only command chains** (`cd x && git status`, #36)
+- **Mode button reflects global always-approve**; hide `/always-approve` slash (#31)
+- **Status bar / gear model label refresh** when session opens without a live `set_model` (fork fix, kept)
+
+### Note
+
+- Fork-only **`src/direct/`** (BYOK Chat / `@grok` / SCM / status bar live model) unchanged
+- Version remains **0.3.1** until an explicit release bump
+
 ## 0.3.1 — 2026-07-09
 
 ### Fixed

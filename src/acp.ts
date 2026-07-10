@@ -25,8 +25,13 @@ import {
   shouldBlockWrite,
 } from "./plan-gate";
 import { resolveGrokHome } from "./sessions";
+import { filterAdvertisedCommands } from "./slash-filter";
 
 export type EffortLevel = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+
+export type PromptContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; mimeType: string; data: string };
 
 export interface AcpClientOptions {
   cliPath: string;
@@ -235,8 +240,17 @@ export class AcpClient extends EventEmitter {
     this.currentModelId = resolveModelId(res.models?.currentModelId, this.availableModels);
     this.emit("session", res);
 
+    // shouldApplyModel skips ids missing from the CLI list; try/catch covers a
+    // listed-but-rejected set_model (agent lock, wire error) so startup never
+    // dies on a bad grok.defaultModel (upstream 1.4.31 / #33).
     if (this.shouldApplyModel(modelId)) {
-      await this.setModel(modelId);
+      try {
+        await this.setModel(modelId);
+      } catch (err) {
+        this.opts.log(
+          `[acp] Failed to set model to ${modelId}: ${(err as Error).message}. Falling back to default model ${this.currentModelId}.`,
+        );
+      }
     }
     return { sessionId: res.sessionId };
   }
@@ -261,7 +275,13 @@ export class AcpClient extends EventEmitter {
     this.emit("session", { sessionId, ...(res ?? {}) });
     this.emit("sessionLoaded", { sessionId });
     if (this.shouldApplyModel(modelId)) {
-      await this.setModel(modelId);
+      try {
+        await this.setModel(modelId);
+      } catch (err) {
+        this.opts.log(
+          `[acp] Failed to set model to ${modelId}: ${(err as Error).message}. Keeping ${this.currentModelId}.`,
+        );
+      }
     }
     return { sessionId };
   }
@@ -308,11 +328,15 @@ export class AcpClient extends EventEmitter {
     // current_mode_update will arrive as a session/update
   }
 
-  async prompt(text: string): Promise<PromptResultMeta> {
+  async prompt(textOrBlocks: string | PromptContentBlock[]): Promise<PromptResultMeta> {
     if (!this.sessionId) throw new Error("no session");
+    const prompt: PromptContentBlock[] =
+      typeof textOrBlocks === "string"
+        ? [{ type: "text", text: textOrBlocks }]
+        : textOrBlocks;
     const result = await this.request("session/prompt", {
       sessionId: this.sessionId,
-      prompt: [{ type: "text", text }],
+      prompt,
     });
     const meta = extractPromptMeta(result);
     this.lastMeta = meta;
@@ -480,8 +504,10 @@ export class AcpClient extends EventEmitter {
       return;
     }
     if (r.event === "commandsUpdate") {
-      this.availableCommands = r.commands;
-      this.emit("commandsUpdate", r.commands);
+      // Hide config-mutating no-op commands (`/always-approve`) from both the
+      // autocomplete and the dispatch gate at the single ingestion point (#31).
+      this.availableCommands = filterAdvertisedCommands(r.commands);
+      this.emit("commandsUpdate", this.availableCommands);
       return;
     }
     if (r.event === "taskBackgrounded") { this.emit("taskBackgrounded", r.payload); return; }
