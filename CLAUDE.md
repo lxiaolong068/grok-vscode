@@ -151,7 +151,9 @@ grok-coder is a **detached fork** of [phuryn/grok-build-vscode](https://github.c
 - **Rebranded — always keep ours:** `package.json` identity, `README`/`CLAUDE.md` publish IDs, welcome byline, telemetry SDK name (`grok-coder`).
 - **Shared surface — real conflict risk:** the ACP side (`src/sidebar.ts`, `src/acp*.ts`, `src/session*.ts`, `src/plan*.ts`, …) and `media/chat.js`, where both sides edit.
 
-Upstream last synced to **v1.5.1** (`d128de8`, 2026-07-10) — see [docs/upstream-sync-v1.5.1.md](docs/upstream-sync-v1.5.1.md).
+Upstream last synced to **v1.5.4** (`cffa93a`) — the v1.5.1 wave is documented in [docs/upstream-sync-v1.5.1.md](docs/upstream-sync-v1.5.1.md); v1.5.2–v1.5.4 was a targeted send-queue sync (#37/#38), skipping v1.5.2's `view-move` (it re-homes the view to the Secondary Side Bar and raises the `engines` floor to VS Code 1.106 — incompatible with our activitybar-only placement, see § Known limits).
+
+**Not yet synced: v1.5.5 → v1.5.12.** ~2000 lines, but our local tree is untouched in most of the files it changes (`chat.css`, `webview-helpers.js`, `protocol.ts`, `sessions.ts`, `plan-restore.ts`, `acp-dispatch.ts` are all 0-diff vs the sync base), so conflicts concentrate in `sidebar.ts`. Highest-value item: **v1.5.6's full subagent support** — grok CLI **0.2.101 does now emit `spawn_subagent` over ACP** (live-verified), so the "subagent cards are deferred" note in § Known limits is stale.
 
 **Sync procedure:**
 

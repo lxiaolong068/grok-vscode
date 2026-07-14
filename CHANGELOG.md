@@ -2,7 +2,16 @@
 
 ## Unreleased (upstream sync)
 
-Synced shared ACP/sidebar surface from upstream **phuryn/grok-build-vscode v1.5.1** (`d128de8`), via path-filtered patch (detached fork — no merge). See [docs/upstream-sync-v1.5.1.md](docs/upstream-sync-v1.5.1.md).
+Synced shared ACP/sidebar surface from upstream **phuryn/grok-build-vscode**, via path-filtered patch (detached fork — no merge). Synced through **v1.5.4** (`cffa93a`); v1.5.1 wave documented in [docs/upstream-sync-v1.5.1.md](docs/upstream-sync-v1.5.1.md).
+
+### Fixed (from upstream 1.5.3–1.5.4)
+
+- **Typing while Grok works no longer cancels its tools** (#37) — Enter used to double as a hidden Stop, silently resolving in-flight tools as *"cancelled by the user"*. Typed text now never cancels: messages compose into a host-owned per-session queue, render as a pending block, survive session switches, and auto-send as one combined message when the turn ends (even while backgrounded). Stop (empty composer only) hands the queued text back to the composer. A background flush never consumes the focused view's composer chips.
+- **Enter during CJK IME composition no longer sends mid-composition** (#38) — the composer respects `isComposing`/`keyCode 229`, so the first Enter confirms the candidate and the second sends.
+
+### Added (from upstream 1.5.3)
+
+- **Live-suite coverage for the Stop contract and concurrent sessions** — `cancel-mid-turn` (id-less `session/cancel` settles the turn as cancelled and leaves the session usable) and `parallel-sessions` (two CLI processes on one workspace answer independently).
 
 ### Added (from upstream 1.4.31–1.5.1)
 
