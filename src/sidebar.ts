@@ -10,7 +10,7 @@ import { selectReapable, computeDot, Dot } from "./session-pool";
 import { resolveVoiceKey, parseVoiceCommand, DEFAULT_SEND_PHRASE } from "./voice";
 import { VoiceRecorder, transcribeAudio, resolveWindowsAudioDevice } from "./voice-recorder";
 import { VoiceStreamer } from "./voice-streamer";
-import { MediaRef, isIncompatibleAgentError, permissionOutcomeFor, summarizeBackgroundCommand } from "./acp-dispatch";
+import { MediaRef, gateZeroTokenMeta, isIncompatibleAgentError, permissionOutcomeFor, summarizeBackgroundCommand } from "./acp-dispatch";
 import { modeToRemember, startsInYolo } from "./mode-prefs";
 import {
   APTABASE_APP_KEY_PROD,
@@ -67,6 +67,7 @@ import {
   fallbackName,
   indexSessions,
   isEmptyPrimerSession,
+  readContextUsage,
   readSessionEntries,
   resolveGrokHome,
   sessionsDirFor,
@@ -1548,7 +1549,13 @@ See design doc for the full state machine diagram.`;
     });
     client.on("promptComplete", (meta) => {
       if (gen !== session.gen) return;
-      this.emit(session, { type: "promptComplete", meta });
+      // gateZeroTokenMeta: a `totalTokens: 0` report is never a real
+      // measurement (/session-info leaves context untouched, /compact shrinks
+      // it — neither empties it), and letting the 0 through zeroed the donut.
+      this.emit(session, { type: "promptComplete", meta: gateZeroTokenMeta(meta) });
+      // grok rewrites signals.json at turn end, so re-read it to keep the donut
+      // true even when the turn's own meta reported nothing usable.
+      this.emitContextUsageSoon(session, gen);
     });
     client.on("xaiNotification", (u) => {
       if (gen !== session.gen) return;
@@ -1708,6 +1715,13 @@ See design doc for the full state machine diagram.`;
         session.activeSessionId = client.sessionId;
       }
       if (gen !== session.gen) { client.dispose(); session.client = undefined; return undefined; }
+
+      // Seed the context donut from grok's persisted signals.json. On a cold
+      // restore no turn has run yet, so the ACP meta has reported nothing and
+      // the donut would read 0/512K until the user's first message — even
+      // though the conversation already fills the window. A brand-new session
+      // has no signals.json, so this is a silent no-op there.
+      this.emitContextUsage(session);
 
       // Configured default not in the CLI list (or set_model failed and we fell
       // back): surface a one-shot warning so the user can fix grok.defaultModel
@@ -3362,6 +3376,29 @@ See design doc for the full state machine diagram.`;
       else next[id] = rest;
     }
     void this.context.globalState.update(SESSION_META_KEY, next);
+  }
+
+  /** Push the context size from grok's on-disk signals.json to the webview —
+   *  the source that has a real count when the ACP turn meta can't: a cold
+   *  restore (no turn has run, so the donut would sit at 0 until the first
+   *  message) and zero-reporting turns (stripped by gateZeroTokenMeta).
+   *  Best-effort: no readable count, no message — the donut keeps what it has,
+   *  so a brand-new session (no signals.json yet) is a silent no-op. */
+  private emitContextUsage(session: Session): void {
+    const id = session.activeSessionId;
+    if (!id) return;
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+    const usage = readContextUsage({ fs: defaultFs, grokHome: resolveGrokHome(process.env), cwd, id });
+    if (usage) this.emit(session, { type: "contextUsage", used: usage.used, window: usage.window });
+  }
+
+  /** emitContextUsage now, and once more after the CLI's turn-end file flush has
+   *  certainly landed (that write races the ACP response by a beat). */
+  private emitContextUsageSoon(session: Session, gen: number): void {
+    this.emitContextUsage(session);
+    setTimeout(() => {
+      if (gen === session.gen) this.emitContextUsage(session);
+    }, 1500);
   }
 
   /** Clear a session's unread badge (it's being opened/viewed) and refresh its dot. */

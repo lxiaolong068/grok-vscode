@@ -3990,6 +3990,13 @@
       case "sessionContext":
         addSessionContextBanner();
         break;
+      case "contextUsage":
+        // Real count read from grok's on-disk signals.json by the host. Covers
+        // what the turn meta can't: a cold restore, where no turn has run yet
+        // and the donut would otherwise sit at 0 until the first message.
+        if (msg.window) state.contextWindow = msg.window;
+        updateDonut(msg.used);
+        break;
       case "clearMessages":
         resetForNewSession();
         break;

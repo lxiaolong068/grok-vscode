@@ -95,6 +95,10 @@ export type HostMsg =
   | { type: "setBusy"; value: boolean; locked?: boolean }
   | { type: "summarizing" }
   | { type: "sessionContext" }
+  // Real context size read from grok's on-disk signals.json — covers the cases
+  // the ACP turn meta can't: a cold restore (no turn has run, donut would sit
+  // at 0) and zero-reporting turns (stripped by gateZeroTokenMeta).
+  | { type: "contextUsage"; used: number; window?: number }
   | { type: "clearMessages" }
   | { type: "onboarding"; state: "missing-cli" | "auth-required"; platform?: string }
   | { type: "error"; text: string }
@@ -168,7 +172,7 @@ const HOST_MESSAGE_TYPE_MAP: Record<HostMsg["type"], true> = {
   permissionResolved: true, exitPlanRequest: true, questionRequest: true,
   planNotice: true, planBlocked: true, promptComplete: true, agentReset: true,
   agentError: true, agentEnd: true, exit: true, setBusy: true, summarizing: true,
-  sessionContext: true, clearMessages: true, onboarding: true, error: true,
+  sessionContext: true, contextUsage: true, clearMessages: true, onboarding: true, error: true,
   xaiNotification: true, sessions: true, sessionDot: true, queuedSends: true,
 };
 

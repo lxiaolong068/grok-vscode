@@ -22,7 +22,7 @@
     "planHistoryQueue", "planProcessing", "toolCall", "toolCallUpdate", "permissionRequest",
     "permissionResolved", "exitPlanRequest", "questionRequest", "planNotice", "planBlocked",
     "promptComplete", "agentReset", "agentError", "agentEnd", "exit", "setBusy", "summarizing",
-    "sessionContext", "clearMessages", "onboarding", "error", "xaiNotification", "sessions",
+    "sessionContext", "contextUsage", "clearMessages", "onboarding", "error", "xaiNotification", "sessions",
     "sessionDot", "queuedSends",
   ];
   const WEBVIEW_MESSAGE_TYPES = [

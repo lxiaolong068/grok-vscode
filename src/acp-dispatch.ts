@@ -264,6 +264,19 @@ export function extractPromptMeta(result: any): PromptResultMeta {
   };
 }
 
+/**
+ * Strip a turn's `totalTokens: 0` report — it is never a real measurement.
+ * grok reports 0 both for `/session-info` (context untouched — the 0 would
+ * zero the donut) and for `/compact` (context SHRUNK, not emptied — 0 is wrong
+ * there too; the "Compacted." bubble is the it-worked signal, and the next turn
+ * reports the true post-compact size). `undefined` means "no update": the donut
+ * keeps its last real value. Non-zero counts pass through.
+ */
+export function gateZeroTokenMeta(meta: PromptResultMeta): PromptResultMeta {
+  if (meta.totalTokens !== 0) return meta;
+  return { ...meta, totalTokens: undefined };
+}
+
 export function makePermissionResponse(id: number | string, optionId: string) {
   return {
     jsonrpc: "2.0",

@@ -4,6 +4,10 @@
 
 Synced shared ACP/sidebar surface from upstream **phuryn/grok-build-vscode**, via path-filtered patch (detached fork — no merge). Synced through **v1.5.4** (`cffa93a`); v1.5.1 wave documented in [docs/upstream-sync-v1.5.1.md](docs/upstream-sync-v1.5.1.md).
 
+### Fixed (from upstream 1.5.5)
+
+- **The context donut no longer resets to 0 when you reopen a session.** A restored session had no live turn yet, so the ACP turn meta had reported nothing and the donut read `0K/500K` even though the conversation already filled the window. It now seeds from grok's persisted `signals.json` (`contextTokensUsed`/`contextWindowTokens`) on restore, and re-reads it at every turn end. Relatedly, a turn's `totalTokens: 0` report is never a real measurement (`/session-info` leaves context untouched; `/compact` shrinks it, doesn't empty it) and is now stripped host-side instead of zeroing the donut. ([src/sessions.ts](src/sessions.ts), [src/acp-dispatch.ts](src/acp-dispatch.ts), [src/sidebar.ts](src/sidebar.ts), [media/chat.js](media/chat.js))
+
 ### Fixed (from upstream 1.5.3–1.5.4)
 
 - **Typing while Grok works no longer cancels its tools** (#37) — Enter used to double as a hidden Stop, silently resolving in-flight tools as *"cancelled by the user"*. Typed text now never cancels: messages compose into a host-owned per-session queue, render as a pending block, survive session switches, and auto-send as one combined message when the turn ends (even while backgrounded). Stop (empty composer only) hands the queued text back to the composer. A background flush never consumes the focused view's composer chips.

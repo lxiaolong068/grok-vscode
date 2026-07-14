@@ -215,6 +215,32 @@ export function readSessionEntries(deps: ReadEntriesDeps): SessionListEntry[] {
   return out;
 }
 
+export interface ContextUsage {
+  used: number;
+  window?: number;
+}
+
+/** Read grok's persisted context usage from a session's `signals.json`
+ *  (`contextTokensUsed` / `contextWindowTokens`). grok rewrites the file at the
+ *  end of every turn, so it's the only source of a real count before any live
+ *  turn has run — i.e. on a cold restore, where the ACP turn meta hasn't
+ *  reported yet and the donut would otherwise sit at 0. Null when the file is
+ *  missing/unreadable or the count isn't a positive number. Pure. */
+export function readContextUsage(deps: { fs: FsLike; grokHome: string; cwd: string; id: string }): ContextUsage | null {
+  const { fs, grokHome, cwd, id } = deps;
+  const signalsPath = path.join(sessionsDirFor(grokHome, cwd), id, "signals.json");
+  try {
+    const raw = JSON.parse(fs.readFileSync(signalsPath, "utf8"));
+    const used = raw?.contextTokensUsed;
+    if (typeof used !== "number" || !Number.isFinite(used) || used <= 0) return null;
+    const window = raw?.contextWindowTokens;
+    const hasWindow = typeof window === "number" && Number.isFinite(window) && window > 0;
+    return { used, window: hasWindow ? window : undefined };
+  } catch {
+    return null;
+  }
+}
+
 /** Full session list sorted by last activity. Equivalent to `indexSessions` + `readSessionEntries`
  *  over every id; reads every summary.json, so prefer the paginated index/read primitives on hot
  *  paths. Kept for callers that genuinely need the whole list at once. */
