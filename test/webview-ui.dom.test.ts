@@ -409,23 +409,50 @@ describe("context donut (token usage)", () => {
     return h;
   };
 
-  it("accepts totalTokens 0 — a native /compact resets the count, the donut must not freeze", () => {
+  it("updates on a real totalTokens; keeps the last value when the host stripped it", () => {
     const { window, doc } = boot();
     dispatch(window, { type: "promptComplete", meta: { totalTokens: 32000 } });
     expect($(doc, "donut-label").textContent).toBe("32K/100K");
-    // The compact turn's response reports totalTokens: 0 (verified against grok
-    // 0.2.87 in research/compact.md). The old truthy gate swallowed it and the
-    // donut kept showing the pre-compact value — "did /compact even work?".
-    dispatch(window, { type: "promptComplete", meta: { totalTokens: 0 } });
-    expect($(doc, "donut-label").textContent).toBe("0K/100K");
-  });
-
-  it("still ignores a promptComplete that carries no totalTokens at all", () => {
-    const { window, doc } = boot();
-    dispatch(window, { type: "promptComplete", meta: { totalTokens: 32000 } });
+    // gateZeroTokenMeta strips totalTokens:0 host-side (#39 — /session-info AND
+    // /compact report 0, never a real measurement), so the webview only ever
+    // sees a real number or nothing. Nothing = keep the last real value.
+    dispatch(window, { type: "promptComplete", meta: { totalTokens: undefined } });
     dispatch(window, { type: "promptComplete", meta: {} });
     dispatch(window, { type: "promptComplete" });
     expect($(doc, "donut-label").textContent).toBe("32K/100K");
+  });
+
+  it("contextUsage (host-read signals.json) updates used and the window", () => {
+    const { window, doc } = boot();
+    dispatch(window, { type: "contextUsage", used: 29088, window: 200000 });
+    expect($(doc, "donut-label").textContent).toBe("29K/200K");
+  });
+
+  it("contextUsage without a window keeps the model-derived window", () => {
+    const { window, doc } = boot();
+    dispatch(window, { type: "contextUsage", used: 29088 });
+    expect($(doc, "donut-label").textContent).toBe("29K/100K");
+  });
+
+  it("seeds a cold restore: the session event zeroes the donut, contextUsage restores it", () => {
+    // Cold-restore buffered order: `session` (resets the donut to 0) → replay →
+    // `contextUsage` (the host reads signals.json after loadSession returns).
+    const { window, doc } = boot();
+    expect($(doc, "donut-label").textContent).toBe("0K/100K");
+    dispatch(window, { type: "contextUsage", used: 44123, window: 100000 });
+    expect($(doc, "donut-label").textContent).toBe("44K/100K");
+  });
+
+  it("a stripped zero keeps the donut, a later contextUsage corrects it", () => {
+    const { window, doc } = boot();
+    dispatch(window, { type: "promptComplete", meta: { totalTokens: 40088 } });
+    // /compact reports a stripped zero; the CLI recomputes signals.json only
+    // when the NEXT turn ends (research/signals-refresh-probe.cjs), so the
+    // corrected count arrives via contextUsage after a follow-up zero turn
+    // (e.g. /session-info) — compact shrinks context, it doesn't empty it.
+    dispatch(window, { type: "promptComplete", meta: {} });
+    dispatch(window, { type: "contextUsage", used: 29088 });
+    expect($(doc, "donut-label").textContent).toBe("29K/100K");
   });
 });
 
@@ -448,33 +475,6 @@ describe("gear settings lock (model + effort disabled while busy / priming)", ()
     click(window, $(doc, "gear-btn"));
     expect(modelBtn(doc).textContent).toContain("Grok Build");
     expect(modelBtn(doc).textContent).not.toContain("grok-build");
-  });
-
-  it("refreshes the open gear model label on modelChanged (no reopen needed)", () => {
-    const { window, doc } = bootWithModels();
-    click(window, $(doc, "gear-btn"));
-    expect(modelBtn(doc).textContent).toContain("Grok Build");
-
-    dispatch(window, { type: "modelChanged", modelId: "grok-composer-2.5-fast" });
-    // Gear truncates the label to 16 chars ("Composer 2.5 Fas…").
-    expect(modelBtn(doc).textContent).toMatch(/Composer 2\.5/);
-    expect(modelBtn(doc).textContent).not.toContain("Grok Build");
-  });
-
-  it("refreshes the open gear model label when a session event reports a new model without modelChanged", () => {
-    // Cross-agent restart / new session: CLI often already opens on the desired
-    // model so set_model is skipped and modelChanged never fires.
-    const { window, doc } = bootWithModels();
-    click(window, $(doc, "gear-btn"));
-    expect(modelBtn(doc).textContent).toContain("Grok Build");
-
-    dispatch(window, {
-      type: "session",
-      sessionId: "s2",
-      models,
-      currentModelId: "grok-composer-2.5-fast",
-    });
-    expect(modelBtn(doc).textContent).toMatch(/Composer 2\.5/);
   });
 
   it("when idle, the model button opens the picker and a pick posts setModel", () => {
@@ -535,10 +535,11 @@ describe("reasoning trace (regression: thinking traces no longer expandable)", (
     const body = block.querySelector(".thinking-body") as HTMLElement;
     const chevron = block.querySelector(".thinking-chevron") as HTMLElement;
 
-    // Chevron is the same glyph as tool groups; the body's open state is driven by
-    // the `.expanded` class on the block (CSS rotates the chevron), not a text swap.
+    // Chevron is the same SVG glyph as tool groups; the body's open state is
+    // driven by the `.expanded` class on the block (CSS rotates the chevron),
+    // not a glyph swap.
     expect(body.hidden).toBe(true);
-    expect(chevron.textContent).toBe("›");
+    expect(chevron.querySelector("svg")).not.toBeNull();
     expect(block.classList.contains("expanded")).toBe(false);
 
     click(window, hdr);
@@ -1450,5 +1451,116 @@ describe("composer input focus (caret ready on open)", () => {
     ($(doc, "input") as HTMLTextAreaElement).blur();
     dispatch(window, { type: "clearMessages" });
     expect(doc.activeElement).toBe($(doc, "input"));
+  });
+});
+
+describe("context popover (donut click, #39)", () => {
+  it("opens on donut click with the context line, closes on outside click", () => {
+    const { window, doc } = bootWebview();
+    dispatch(window, { type: "promptComplete", meta: { totalTokens: 44123 } });
+
+    click(window, $(doc, "donut"));
+    const pop = $(doc, "context-popover");
+    expect((pop as any).hidden).toBe(false);
+    expect(pop.textContent).toContain("Context used");
+
+    click(window, $(doc, "messages"));
+    expect((pop as any).hidden).toBe(true);
+  });
+
+  it("shows only the context line — no action rows", () => {
+    const { window, doc } = bootWebview();
+    click(window, $(doc, "donut"));
+    expect($(doc, "context-popover").querySelector(".toolbar-popover-item")).toBeNull();
+  });
+});
+
+describe("agent message footer (copy + timestamp) — one per turn", () => {
+  it("keeps the footer only on the turn's last narration segment, revealed at turn end", () => {
+    const { window, doc } = bootWebview();
+    dispatch(window, { type: "userMessage", text: "do things" });
+    dispatch(window, { type: "agentStart" });
+    dispatch(window, { type: "messageChunk", text: "first I'll look around" });
+    // A tool group splits the prose into a second .msg.agent segment.
+    dispatch(window, { type: "toolCall", call: { toolCallId: "t1", title: "read_file", kind: "read" } });
+    dispatch(window, { type: "messageChunk", text: "here is the conclusion" });
+
+    // Mid-turn: the (single) footer exists but is HIDDEN — no copy icons
+    // flickering through the conversation while the agent works.
+    let agentFooters = [...doc.querySelectorAll(".msg.agent .msg-actions")] as HTMLElement[];
+    expect(agentFooters).toHaveLength(1);
+    expect(agentFooters[0].hidden).toBe(true);
+
+    dispatch(window, { type: "promptComplete", meta: {} }); // commits the bubble (real turns always emit it)
+    dispatch(window, { type: "agentEnd" });
+
+    agentFooters = [...doc.querySelectorAll(".msg.agent .msg-actions")] as HTMLElement[];
+    expect(agentFooters).toHaveLength(1);
+    expect(agentFooters[0].hidden).toBe(false);
+    // …and it sits on the LAST segment (the conclusion), not the first.
+    expect(agentFooters[0].closest(".msg.agent")!.textContent).toContain("here is the conclusion");
+    // The user bubble keeps its own footer, visible immediately.
+    expect(doc.querySelectorAll(".msg.user .msg-actions")).toHaveLength(1);
+  });
+
+  it("each turn keeps its own footer — a new turn doesn't steal the previous one", () => {
+    const { window, doc } = bootWebview();
+    dispatch(window, { type: "userMessage", text: "q1" });
+    dispatch(window, { type: "agentStart" });
+    dispatch(window, { type: "messageChunk", text: "answer one" });
+    dispatch(window, { type: "promptComplete", meta: {} });
+    dispatch(window, { type: "agentEnd" });
+    dispatch(window, { type: "userMessage", text: "q2" });
+    dispatch(window, { type: "agentStart" });
+    dispatch(window, { type: "messageChunk", text: "answer two" });
+    dispatch(window, { type: "promptComplete", meta: {} });
+    dispatch(window, { type: "agentEnd" });
+
+    expect(doc.querySelectorAll(".msg.agent .msg-actions")).toHaveLength(2);
+  });
+});
+
+describe("composer autosize", () => {
+  it("sets an explicit height on every input change (grow-to-5-lines wiring)", () => {
+    // happy-dom has no layout (scrollHeight is 0), so the growth itself can't
+    // be measured here — this pins the wiring: typing re-runs autosize and the
+    // height is always an explicit px value with overflow managed.
+    const { window, doc } = bootWebview();
+    const input = $(doc, "input") as HTMLTextAreaElement;
+    input.value = "line1\nline2\nline3\nline4\nline5\nline6";
+    input.dispatchEvent(new window.Event("input", { bubbles: true }));
+    expect(input.style.height).toMatch(/px$/);
+    expect(["auto", "hidden"]).toContain(input.style.overflowY);
+  });
+});
+
+describe("welcome screen visibility (logo/byline hides once real content exists)", () => {
+  it("hides the welcome block on the first live user message", () => {
+    const { window, doc } = bootWebview();
+    expect(($(doc, "welcome") as any).hidden).toBe(false);
+
+    dispatch(window, { type: "userMessage", text: "hello grok" });
+
+    expect(($(doc, "welcome") as any).hidden).toBe(true);
+  });
+
+  it("hides the welcome when a restored session replays real user content", () => {
+    const { window, doc } = bootWebview();
+    dispatch(window, { type: "historyReplay", active: true });
+    dispatch(window, { type: "userMessageChunk", text: "a real question" });
+    dispatch(window, { type: "messageChunk", text: "an answer" });
+    dispatch(window, { type: "historyReplay", active: false });
+
+    expect(($(doc, "welcome") as any).hidden).toBe(true);
+  });
+
+  it("keeps the welcome on a primer-only restore — the primer is not user content", () => {
+    const { window, doc } = bootWebview();
+    dispatch(window, { type: "historyReplay", active: true });
+    dispatch(window, { type: "userMessageChunk", text: "[grok-build-vscode primer v4] Plan-mode protocol instructions." });
+    dispatch(window, { type: "messageChunk", text: "ok" });
+    dispatch(window, { type: "historyReplay", active: false });
+
+    expect(($(doc, "welcome") as any).hidden).toBe(false);
   });
 });

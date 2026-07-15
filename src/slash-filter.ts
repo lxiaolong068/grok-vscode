@@ -5,12 +5,14 @@ export interface SlashCmd {
 
 /**
  * Slash commands the extension hides from both the autocomplete list and the
- * dispatch gate (#31). `/always-approve` only mutates grok's *global*
+ * dispatch gate. `/always-approve` (#31) only mutates grok's *global*
  * config.toml — a surprising, sticky side effect that then silences permission
- * cards in every grok session — and is a no-op over ACP anyway, so advertising
- * it is pure confusion. Filtered at ingestion (see `filterAdvertisedCommands`).
+ * cards in every grok session — and is a no-op over ACP anyway. `/context`
+ * (#39) renders only in the CLI's own TUI: over ACP stdio it streams nothing
+ * back, so selecting it silently does nothing (`/session-info` is the working
+ * equivalent). Filtered at ingestion (see `filterAdvertisedCommands`).
  */
-export const HIDDEN_SLASH_COMMANDS: ReadonlySet<string> = new Set(["always-approve"]);
+export const HIDDEN_SLASH_COMMANDS: ReadonlySet<string> = new Set(["always-approve", "context"]);
 
 /** Drop hidden commands from an advertised `available_commands_update` list. */
 export function filterAdvertisedCommands<T extends { name: string }>(commands: T[]): T[] {

@@ -63,6 +63,60 @@ describe("plan card (real chat.js in a DOM)", () => {
     expect(feedback.value).toBe("  keep this comment  ");
   });
 
+  it("planResolved collapses a replayed plan card so it can't come back actionable", () => {
+    // Re-focus replay order after a live Cancel: the buffered exitPlanRequest
+    // (which rebuilds the actionable card) followed by the buffered resolution.
+    const { window, doc } = bootWebview();
+    dispatch(window, { type: "exitPlanRequest", req: { id: 21, plan: "p" } });
+    dispatch(window, { type: "planResolved", requestId: 21, verdict: "abandoned" });
+
+    const card = doc.querySelector(".card.plan")!;
+    expect(card.classList.contains("resolved")).toBe(true);
+    expect(card.querySelector(".card-actions")).toBeNull();
+    expect(card.querySelector("textarea.plan-feedback")).toBeNull();
+    expect(card.querySelector(".plan-verdict-label")!.textContent).toBe("Cancelled");
+
+    // No plan-file link on this card (snapshot creation failed) → the text
+    // stays reachable behind the Show/Hide fallback toggle.
+    const body = card.querySelector(".plan-body") as HTMLElement;
+    const toggle = card.querySelector(".plan-toggle") as HTMLButtonElement;
+    expect(body.hidden).toBe(true);
+    expect(toggle.textContent).toBe("Show plan");
+    click(window, toggle);
+    expect(body.hidden).toBe(false);
+    expect(toggle.textContent).toBe("Hide plan");
+  });
+
+  it("a resolved card with a plan-file link drops the inline plan entirely (the file IS the plan)", () => {
+    const { window, doc } = bootWebview();
+    dispatch(window, {
+      type: "exitPlanRequest",
+      req: { id: 23, plan: "1. step", planPath: "/tmp/grok/plan9.md", planName: "plan9.md" },
+    });
+    const approve = [...doc.querySelectorAll(".card.plan .card-actions button")]
+      .find((b) => b.textContent === "Approve & implement") as HTMLButtonElement;
+    click(window, approve);
+
+    const card = doc.querySelector(".card.plan")!;
+    expect(card.classList.contains("resolved")).toBe(true);
+    expect(card.querySelector(".plan-body")).toBeNull();
+    expect(card.querySelector(".plan-toggle")).toBeNull();
+    expect(card.querySelector(".plan-file-link code")!.textContent).toBe("plan9.md");
+    expect(card.querySelector(".plan-verdict-label")!.textContent).toBe("Approved");
+  });
+
+  it("planResolved is idempotent after a live click already collapsed the card", () => {
+    const { window, doc } = bootWebview();
+    dispatch(window, { type: "exitPlanRequest", req: { id: 22, plan: "p" } });
+    const cancel = [...doc.querySelectorAll(".card.plan .card-actions button")]
+      .find((b) => b.textContent === "Cancel") as HTMLButtonElement;
+    click(window, cancel); // live collapse
+    dispatch(window, { type: "planResolved", requestId: 22, verdict: "abandoned" }); // buffered echo
+
+    const card = doc.querySelector(".card.plan")!;
+    expect(card.querySelectorAll(".plan-verdict-label")).toHaveLength(1); // no double label
+  });
+
   it("'Reject' with empty feedback sends verdict:rejected and NO comment key", () => {
     const { window, posted, doc } = bootWebview();
     dispatch(window, { type: "exitPlanRequest", req: { id: 11, plan: "p" } });
@@ -173,7 +227,7 @@ describe("plan card (real chat.js in a DOM)", () => {
     expect(label.classList.contains("plan-verdict-rejected")).toBe(true);
   });
 
-  it("renders a read-only plan-history card with the persisted verdict label", () => {
+  it("renders a read-only plan-history card: file link + verdict, no inline plan text", () => {
     const { window, doc } = bootWebview();
     dispatch(window, {
       type: "planHistory",
@@ -186,7 +240,9 @@ describe("plan card (real chat.js in a DOM)", () => {
     const cards = doc.querySelectorAll(".card.plan.plan-history");
     expect(cards).toHaveLength(1);
     const card = cards[0];
-    expect(card.querySelector(".plan-body")!.textContent).toContain("step 1");
+    // The plan-file link IS the plan — no inline body / toggle when it exists.
+    expect(card.querySelector(".plan-body")).toBeNull();
+    expect(card.querySelector(".plan-toggle")).toBeNull();
     expect(card.querySelector(".plan-file-link code")!.textContent).toBe("restored-plan.md");
     expect(card.querySelector(".plan-verdict-label")!.textContent).toBe("Rejected");
     expect(card.querySelector(".card-actions")).toBeNull();

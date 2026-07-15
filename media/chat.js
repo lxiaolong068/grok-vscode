@@ -14,8 +14,10 @@
   const addBtn = $("add-btn");
   const chipsEl = $("chips");
   const attachmentsEl = $("attachments");
+  const donutEl = $("donut");
   const donutArc = $("donut-arc");
   const donutLabel = $("donut-label");
+  const contextPopover = $("context-popover");
   const slashPopover = $("slash-popover");
   const modePopover = $("mode-popover");
   const gearPopover = $("gear-popover");
@@ -109,12 +111,22 @@
     sessionHasMore: false,
     sessionLoading: false,
     sessionQuery: "",
+    // Index offset for the next load-more (from the host's `nextOffset` — slots
+    // consumed, not entries shown; hidden subagent sessions occupy slots).
+    sessionNextOffset: null,
     replaying: false,
     // Live ask_user_question tool calls (toolCallId → {questions, fromReplay}).
     // grok emits a tool_call alongside the live x.ai/ask_user_question request; we
     // stash it to suppress the generic tool chip (the interactive card from
     // `questionRequest` stands in).
     questionToolCalls: new Map(),
+    // Subagent delegation rows (toolCallId → card element) so the completed
+    // tool_call_update finds its row (title refinement, duration, result)
+    // instead of leaking into the generic tool group.
+    subagentCards: new Map(),
+    // The current turn's agent-message footer (copy + timestamp). Only the
+    // turn's LAST narration segment keeps one — see addMessage.
+    turnAgentActionsEl: null,
     // Restored question cards on resume (toolCallId → card element). On replay grok
     // sends a tool_call per question (with rawInput.questions); we render the card
     // immediately and fill the answer in whenever it arrives — on the tool_call
@@ -232,6 +244,7 @@
     zap: `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/></svg>`,
     copy: `<svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>`,
     check: `<svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>`,
+    chevronRight: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>`,
     clock: `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>`,
     plus: `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>`,
     x: `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>`,
@@ -316,7 +329,7 @@
 
   // ---------- markdown ----------
 
-  const { looksLikeFileRef, formatRelativeTime, modelDisplayName, nextMicState, trailingSendPhrase, buildQuestionAnswers, isSubagentToolCall, subagentLabel, shouldStickToBottom, splitMath, stripUnsupportedTex, toolFailureText, parseAttachmentContext, parseSelectionBlocks, parseImageTags, isKnownHostMessage } = globalThis.GrokWebviewHelpers;
+  const { looksLikeFileRef, formatRelativeTime, modelDisplayName, nextMicState, trailingSendPhrase, buildQuestionAnswers, isSubagentToolCall, subagentLabel, cleanSubagentOutput, shouldStickToBottom, splitMath, stripUnsupportedTex, toolFailureText, parseAttachmentContext, parseSelectionBlocks, parseImageTags, isKnownHostMessage } = globalThis.GrokWebviewHelpers;
 
   function escapeAttr(s) {
     return String(s == null ? "" : s)
@@ -666,9 +679,8 @@
       if (lang === "mermaid") {
         codeBlocks.push(
           `<div class="code-block mermaid-block">` +
-            `<button class="code-copy-btn" type="button" title="Copy code">` +
+            `<button class="code-copy-btn" type="button" title="Copy code" aria-label="Copy code">` +
               `<span class="code-copy-glyph">${ICON.copy}</span>` +
-              `<span class="code-copy-label">Copy code</span>` +
             `</button>` +
             `<pre class="mermaid-src"><code>${escapeHtml(code).trimEnd()}</code></pre>` +
           `</div>`
@@ -681,9 +693,8 @@
         : `<code>${escapeHtml(code).trimEnd()}</code>`;
       codeBlocks.push(
         `<div class="code-block${isDiff ? " diff" : ""}">` +
-          `<button class="code-copy-btn" type="button" title="Copy code">` +
+          `<button class="code-copy-btn" type="button" title="Copy code" aria-label="Copy code">` +
             `<span class="code-copy-glyph">${ICON.copy}</span>` +
-            `<span class="code-copy-label">Copy code</span>` +
           `</button>` +
           `<pre>${inner}</pre>` +
         `</div>`
@@ -912,6 +923,29 @@
     gearPopover.hidden = true;
     addPopover.hidden = true;
     historyPopover.hidden = true;
+    contextPopover.hidden = true;
+  }
+
+  // Context details on demand (donut click). Deliberately minimal: the exact
+  // token line the donut abbreviates. Richer rows pending user feedback on #39.
+  function openContextPopover() {
+    closePopovers();
+    contextPopover.innerHTML = "";
+    const info = (label, value) => {
+      const el = document.createElement("div");
+      el.className = "popover-info";
+      el.innerHTML = `<span>${label}</span><span>${escapeHtml(value)}</span>`;
+      contextPopover.appendChild(el);
+    };
+    const used = state.usedTokens || 0;
+    const pct = Math.min(100, Math.round((used / state.contextWindow) * 100));
+    info("Context used", `${used.toLocaleString()} / ${state.contextWindow.toLocaleString()} (${pct}%)`);
+    const fine = document.createElement("div");
+    fine.className = "popover-fineprint";
+    fine.textContent = "Counted by the CLI at the end of each turn.";
+    contextPopover.appendChild(fine);
+    positionPopover(contextPopover, donutEl);
+    contextPopover.hidden = false;
   }
 
   function positionPopover(popover, btn) {
@@ -1334,7 +1368,7 @@
     list.onscroll = () => {
       if (!state.sessionHasMore || state.sessionLoading) return;
       if (list.scrollTop + list.clientHeight >= list.scrollHeight - 48) {
-        requestSessions(state.sessions.length);
+        requestSessions(state.sessionNextOffset != null ? state.sessionNextOffset : state.sessions.length);
       }
     };
     historyPopover.appendChild(list);
@@ -1531,6 +1565,8 @@
     state.pendingDiffByToolCallId.clear();
     state.toolItemsByToolCallId.clear();
     state.toolFailuresById.clear();
+    state.subagentCards.clear();
+    state.turnAgentActionsEl = null;
     state.activeAgentEl = null;
     state.activeAgentRaw = "";
     state.activeUserEl = null;
@@ -1698,6 +1734,24 @@
       actions.appendChild(copyBtn);
       actions.appendChild(ts);
       el.appendChild(actions);
+      if (role === "agent") {
+        // ONE footer per turn, not per narration segment: a turn's prose is
+        // split into several .msg.agent blocks by interleaved tool groups, and
+        // a copy/timestamp row under each is noise. Keep only the newest
+        // segment's footer — the turn's conclusion — and keep it HIDDEN while
+        // the turn is still running (revealTurnFooter shows it at turn end,
+        // with the end-of-turn time). Code blocks keep their own copy buttons.
+        actions.hidden = true;
+        if (state.turnAgentActionsEl && state.turnAgentActionsEl !== actions) {
+          state.turnAgentActionsEl.remove();
+        }
+        state.turnAgentActionsEl = actions;
+      } else {
+        // A user message starts a new turn; the previous turn's footer (if the
+        // replay never emitted an explicit turn end) becomes final now.
+        revealTurnFooter();
+        state.turnAgentActionsEl = null;
+      }
     }
 
     messagesEl.appendChild(el);
@@ -1708,6 +1762,18 @@
       });
     }
     return body;
+  }
+
+  // Show the current turn's (single) agent footer — called at every turn-end
+  // signal: promptComplete/agentEnd/agentError live, the next user message or
+  // replay end on restore. Stamps the time at reveal so it reads as the
+  // turn's END time, not the moment the last segment happened to start.
+  function revealTurnFooter() {
+    const a = state.turnAgentActionsEl;
+    if (!a || !a.hidden) return;
+    a.hidden = false;
+    const ts = a.querySelector(".msg-timestamp");
+    if (ts && !state.replaying) ts.textContent = formatTime(Date.now());
   }
 
   const TOOL_VERB = {
@@ -1995,7 +2061,7 @@
       toolIconFor(el._calls) +
       `<span class="tool-group-label">${escapeHtml(inProgressLabel(call))}</span>` +
       `<span class="tool-dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span>` +
-      `<span class="tool-chevron" aria-hidden="true">›</span>`;
+      `<span class="tool-chevron" aria-hidden="true">${ICON.chevronRight}</span>`;
     hdr.onclick = () => {
       const expanded = !body.hidden;
       body.hidden = expanded;
@@ -2174,22 +2240,177 @@
     scrollToBottom();
   }
 
-  // Distinct card for a subagent tool call (grok's parallel-subagent feature),
-  // so delegated work reads as "Subagent: <type>" instead of disappearing into
-  // the generic tool group. Collapsed scaffold — child-call nesting awaits a
-  // probe of the live subagent wire shape (research/subagents.md).
+  // Distinct row for a subagent delegation (grok's spawn_subagent tool) — the
+  // task reads as "Subagent · <description>" with the shared blink-dots while
+  // the child works, then a duration stamp and a click-to-expand result once
+  // the completed tool_call_update lands (its rawOutput.SubagentCompleted
+  // carries output + stats — research/subagents.md). Keyed by toolCallId in
+  // state.subagentCards; a replayed one-shot tool_call that already carries
+  // the final state renders completed immediately.
+
+  // Human title for the row: the task description grok puts in rawInput, else
+  // a non-generic call title (updates re-title the call from the literal
+  // "spawn_subagent" to the description; some builds title the call just
+  // "Subagent"/"Task" — noise, not a title), else the first line of the task
+  // prompt, else the classifier's label (subagent type / background command).
+  function subagentTitleFor(call) {
+    const d = call && call.rawInput && call.rawInput.description;
+    if (typeof d === "string" && d.trim()) return d.trim();
+    const t = typeof call?.title === "string" ? call.title.trim() : "";
+    if (t && !/^(spawn_subagent|run_terminal_command|subagent|task)$/i.test(t)) return t;
+    const p = call && call.rawInput && call.rawInput.prompt;
+    if (typeof p === "string" && p.trim()) {
+      const first = p.trim().split(/\r?\n/)[0].trim();
+      if (first) return truncate(first, 80);
+    }
+    return subagentLabel(call);
+  }
+
+  // "Subagent · Subagent" is noise — when the resolved title is empty or just
+  // the word Subagent, show the label alone. Never DOWNGRADE: the Composer
+  // agent's completion update arrives untitled (title "", no rawInput), and it
+  // must not wipe the description set by the earlier records.
+  function setSubagentTitle(el, call) {
+    const t = subagentTitleFor(call) || "";
+    const titleEl = el.querySelector(".subagent-title");
+    if (!t || /^subagent$/i.test(t)) {
+      if (!titleEl.textContent) {
+        el.querySelector(".subagent-sep").hidden = true;
+        titleEl.hidden = true;
+      }
+      return;
+    }
+    el.querySelector(".subagent-sep").hidden = false;
+    titleEl.hidden = false;
+    titleEl.textContent = t;
+  }
+
+  function setSubagentResult(el, output) {
+    const body = el.querySelector(".subagent-result");
+    if (!body || body.childNodes.length) return;
+    const result = cleanSubagentOutput(output || "");
+    if (!result) return;
+    body.innerHTML = `<div class="subagent-result-label">Output of the subagent:</div>` + renderMarkdown(result);
+    const row = el.querySelector(".subagent-row");
+    row.classList.add("expandable");
+    row.title = "Show the subagent's result";
+    row.onclick = () => { body.hidden = !body.hidden; };
+  }
+
+  // Complete a card: stop the dots, stamp the duration, attach the expandable
+  // result under an "Output of the subagent:" label. Completion can arrive
+  // twice — a completed tool_call_update AND a subagent_finished lifecycle
+  // event (and a re-focus replays both) — so this is idempotent, except that a
+  // late duplicate may still fill in a missing duration or result.
+  function finishSubagentCard(el, info) {
+    if (el.classList.contains("subagent-done")) {
+      const lateMs = typeof info.durationMs === "number" ? info.durationMs : null;
+      const timeEl = el.querySelector(".subagent-time");
+      if (lateMs != null && timeEl && !timeEl.textContent) {
+        timeEl.textContent = `· ${Math.max(1, Math.round(lateMs / 1000))}s`;
+      }
+      setSubagentResult(el, info.output);
+      return;
+    }
+    el.classList.add("subagent-done");
+    const dots = el.querySelector(".blink-dots");
+    if (dots) dots.remove();
+    const ms = typeof info.durationMs === "number" ? info.durationMs : null;
+    if (ms != null) {
+      el.querySelector(".subagent-time").textContent = `· ${Math.max(1, Math.round(ms / 1000))}s`;
+    }
+    // cleanSubagentOutput strips the CLI envelope (plumbing tags, boilerplate
+    // lead-ins, one wrapping <response> pair, the trailing Agent ID hint) so
+    // only the child's actual words render — as markdown, since subagent
+    // answers routinely carry fences/bold/lists.
+    setSubagentResult(el, info.output);
+  }
+
   function addSubagentCard(call) {
     closeToolGroup();
     clearWelcome();
     hideGrokking();
     const el = document.createElement("div");
     el.className = "subagent-card";
-    const label = escapeHtml(subagentLabel(call));
     el.innerHTML =
-      `<span class="subagent-badge">${ICON.listTree || "🤖"}</span>` +
-      `<span class="subagent-label">Subagent: ${label}</span>`;
+      `<div class="subagent-row">` +
+        `<span class="subagent-badge">${ICON.listTree || "🤖"}</span>` +
+        `<span class="subagent-label">Subagent</span>` +
+        `<span class="subagent-sep">·</span>` +
+        `<span class="subagent-title"></span>` +
+        BLINK_DOTS +
+        `<span class="subagent-time"></span>` +
+      `</div>` +
+      `<div class="subagent-result" hidden></div>`;
+    setSubagentTitle(el, call);
     messagesEl.appendChild(el);
+    if (call && call.toolCallId) state.subagentCards.set(call.toolCallId, el);
+    applySubagentUpdate(call, el); // a replayed call may already be completed
     scrollToBottom();
+  }
+
+  function applySubagentUpdate(call, elOpt) {
+    const el = elOpt || state.subagentCards.get(call?.toolCallId);
+    if (!el) return;
+    setSubagentTitle(el, call);
+    // A background spawn's updates carry the child's task_id — stash it so the
+    // get_command_or_subagent_output poller's TaskOutput can find this card.
+    const tid = call && call.rawInput && call.rawInput.task_id;
+    if (tid && !el.dataset.taskId) el.dataset.taskId = String(tid);
+    // Completion shapes: grok-build's spawn_subagent → status "completed" +
+    // structured rawOutput.SubagentCompleted (output, duration_ms); Composer's
+    // Task → status "completed" + rawOutput {type:"Text", text} with NO
+    // duration (the subagent_finished lifecycle event fills that in).
+    const out = call && call.rawOutput;
+    const status = String(call?.status || "").toLowerCase();
+    const finished = status === "completed" || status === "failed" ||
+      (out && out.type === "SubagentCompleted");
+    if (!finished) return;
+    // Output lives in rawOutput.output (SubagentCompleted), rawOutput.text
+    // ({type:"Text"} — Composer + background acks), or the content text.
+    const output = out && typeof out.output === "string" ? out.output
+      : out && typeof out.text === "string" ? out.text
+      : toolUpdateText(call);
+    // A background spawn (rawInput.background: true) "completes" immediately
+    // with a started-ack while the child keeps running — that's not the
+    // result. Keep the dots; the real output arrives on the
+    // get_command_or_subagent_output poller's TaskOutput, matched back to this
+    // card by the child id parsed here (wire capture: accredia session).
+    if (/^subagent started in background\b/i.test(String(output || "").trim())) {
+      const ackId = /subagent_id:\s*([0-9a-f-]+)/i.exec(String(output));
+      if (ackId && !el.dataset.subagentId) el.dataset.subagentId = ackId[1];
+      return;
+    }
+    finishSubagentCard(el, {
+      durationMs: out && typeof out.duration_ms === "number" ? out.duration_ms : null,
+      output,
+    });
+  }
+
+  // A background delegation's result arrives on the poller tool
+  // (get_command_or_subagent_output), whose completed update carries
+  // rawOutput { type: "TaskOutput", Result: { task_id, duration_secs,
+  // output, … } } — finish the matching card. The poller's own row in the
+  // generic tool group is untouched (this hook doesn't consume the update).
+  function maybeFinishSubagentFromTaskOutput(call) {
+    const out = call && call.rawOutput;
+    if (!out || out.type !== "TaskOutput") return;
+    const results = [];
+    if (out.Result) results.push(out.Result);
+    if (Array.isArray(out.Results)) results.push(...out.Results);
+    for (const res of results) {
+      const tid = res && (res.task_id || res.taskId);
+      if (!tid) continue;
+      const el = [...state.subagentCards.values()].find(
+        (c) => c.dataset.taskId === String(tid) || c.dataset.subagentId === String(tid),
+      );
+      if (!el) continue;
+      finishSubagentCard(el, {
+        durationMs: typeof res.duration_secs === "number" ? Math.round(res.duration_secs * 1000)
+          : typeof res.duration_ms === "number" ? res.duration_ms : null,
+        output: typeof res.output === "string" ? res.output : "",
+      });
+    }
   }
 
   function addPlanNotice(text) {
@@ -2221,7 +2442,7 @@
       hdr.className = "thinking-header";
       // Chevron on the RIGHT (after the label), same glyph as tool groups; expand
       // state is driven by the `.expanded` class (CSS rotates it), like tools.
-      hdr.innerHTML = `<span class="thinking-icon">${ICON.brain}</span><span class="thinking-label">Thinking</span>${BLINK_DOTS}<span class="thinking-chevron" aria-hidden="true">›</span>`;
+      hdr.innerHTML = `<span class="thinking-icon">${ICON.brain}</span><span class="thinking-label">Thinking</span>${BLINK_DOTS}<span class="thinking-chevron" aria-hidden="true">${ICON.chevronRight}</span>`;
       const body = document.createElement("div");
       body.className = "thinking-body";
       body.hidden = true;
@@ -2318,7 +2539,9 @@
     if (state.activeAgentEl || state.activeThoughtEl || state.activeToolGroupEl) {
       commitAgentTurn();
     }
-    clearWelcome();
+    // No clearWelcome() here: the primer / system-reminder checks below may
+    // suppress this entire message, and a primer-only restore must KEEP the
+    // welcome screen. addMessage() clears it when a real bubble renders.
     if (!state.activeUserEl && !state.skipUserBubble) {
       // A new user message is starting. If we're replaying and this message is
       // the extension's primer, suppress it AND grok's response to it — both
@@ -3015,6 +3238,49 @@
     el.appendChild(planTools);
   }
 
+  // "Show plan / Hide plan" toggle for a collapsed plan body — shared by the
+  // restored history card and the live card once resolved, so both read
+  // identically.
+  function makePlanToggle(body) {
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "plan-toggle";
+    const setToggle = () => { toggle.textContent = body.hidden ? "Show plan" : "Hide plan"; };
+    setToggle();
+    toggle.onclick = () => { body.hidden = !body.hidden; setToggle(); };
+    return toggle;
+  }
+
+  // Collapse a live plan card to the same clean representation as a restored
+  // history card: drop the buttons + comment box and show one colored verdict
+  // label. A resolved plan drops its inline text entirely — the plan-file
+  // link IS the plan (opens as an editor tab); the Show/Hide toggle survives
+  // only as the no-file fallback so the text stays reachable. Shared by the
+  // live button click and the buffered `planResolved` replay (re-focus), so a
+  // resolved card can never come back actionable.
+  function resolvePlanCardEl(el, verdict) {
+    el.classList.add("resolved");
+    const actions = el.querySelector(".card-actions");
+    if (actions) actions.remove();
+    const feedback = el.querySelector(".plan-feedback");
+    if (feedback) feedback.remove();
+    const body = el.querySelector(".plan-body");
+    if (body) {
+      if (el.querySelector(".plan-file-link")) {
+        body.remove();
+        const toggle = el.querySelector(".plan-toggle");
+        if (toggle) toggle.remove();
+      } else if (!el.querySelector(".plan-toggle")) {
+        body.hidden = true;
+        el.insertBefore(makePlanToggle(body), body);
+      }
+    }
+    const status = document.createElement("div");
+    status.className = "plan-verdict-label plan-verdict-" + verdict;
+    status.textContent = VERDICT_LABEL[verdict] ?? "Resolved";
+    el.appendChild(status);
+  }
+
   function addPlanCard(req) {
     clearWelcome();
     hideGrokking();
@@ -3024,6 +3290,7 @@
     commitAgentTurn();
     const el = document.createElement("div");
     el.className = "card plan";
+    el.dataset.planReqId = String(req.id);
     const title = document.createElement("div");
     title.className = "card-title";
     title.textContent = "Plan ready for review";
@@ -3064,16 +3331,8 @@
           verdict,
           ...(comment ? { comment } : {}),
         });
-        el.classList.add("resolved");
-        // Collapse to the same clean representation as a restored history card:
-        // drop the buttons + comment box and show one colored verdict label.
         // (The comment, if any, lands as its own user bubble below.)
-        actions.remove();
-        feedback.remove();
-        const status = document.createElement("div");
-        status.className = "plan-verdict-label plan-verdict-" + verdict;
-        status.textContent = VERDICT_LABEL[verdict] ?? "Resolved";
-        el.appendChild(status);
+        resolvePlanCardEl(el, verdict);
       };
       return b;
     };
@@ -3108,23 +3367,21 @@
 
     addPlanFileLink(el, planPath, planName);
 
-    // Restored plans are reference material, not something to act on — keep them
-    // collapsed by default so a resumed session isn't a wall of old plan text.
-    // The body stays in the DOM (just hidden) behind a toggle.
-    const body = document.createElement("div");
-    body.className = "plan-body";
-    body.hidden = true;
-    body.innerHTML = text ? renderMarkdown(text) : "(empty plan)";
-    renderMermaidIn(body);
+    // Restored plans are reference material, not something to act on — and the
+    // plan-file link IS the plan (opens as an editor tab), so no inline text at
+    // all when it exists. Only without a link (snapshot creation failed /
+    // legacy session) fall back to the collapsed body + Show/Hide toggle so
+    // the text stays reachable.
+    if (!planPath) {
+      const body = document.createElement("div");
+      body.className = "plan-body";
+      body.hidden = true;
+      body.innerHTML = text ? renderMarkdown(text) : "(empty plan)";
+      renderMermaidIn(body);
 
-    const toggle = document.createElement("button");
-    toggle.type = "button";
-    toggle.className = "plan-toggle";
-    const setToggle = () => { toggle.textContent = body.hidden ? "Show plan" : "Hide plan"; };
-    setToggle();
-    toggle.onclick = () => { body.hidden = !body.hidden; setToggle(); };
-    el.appendChild(toggle);
-    el.appendChild(body);
+      el.appendChild(makePlanToggle(body));
+      el.appendChild(body);
+    }
 
     if (verdictLabel) {
       const status = document.createElement("div");
@@ -3202,7 +3459,7 @@
     used = state.usedTokens || 0;
     const max = state.contextWindow;
     const pct = Math.min(100, Math.round((used / max) * 100));
-    const circumference = 2 * Math.PI * 5;
+    const circumference = 2 * Math.PI * 6; // must match the donut circles' r in getHtml
     const arc = (pct / 100) * circumference;
     donutArc.setAttribute("stroke-dasharray", `${arc} ${circumference}`);
     let color = "var(--vscode-charts-green, #4ec9b0)";
@@ -3440,11 +3697,29 @@
 
   // Mirror the composer text onto the backdrop, wrapping a trailing send command
   // ("grok send") in an accent pill. Call whenever the input value changes.
+  // Auto-grow the composer with its content: 2 lines at rest (Cursor-style,
+  // matching the textarea's rows attribute), expanding to 5 as the user
+  // types, then scrolling. The .input-highlight overlay is inset:0 in the
+  // same wrap, so it tracks the height for free; its scrollTop is synced in
+  // renderInputHighlight.
+  function autosizeInput() {
+    const cs = window.getComputedStyle(input);
+    const line = parseFloat(cs.lineHeight) || 20;
+    const pad = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+    const min = Math.round(line * 2 + pad);
+    const max = Math.round(line * 5 + pad);
+    input.style.height = "auto";
+    const content = input.scrollHeight;
+    input.style.height = Math.max(min, Math.min(content, max)) + "px";
+    input.style.overflowY = content > max ? "auto" : "hidden";
+  }
+
   function renderInputHighlight() {
     // The busy button's face reads the composer too (text = queue-send arrow,
     // empty = Stop) — refresh it on every input change; this function's call
     // sites are exactly those.
     updateSendButton();
+    autosizeInput();
     if (!inputHighlight) return;
     const text = input.value;
     const range = trailingSendPhrase(text, state.voiceSendPhrase);
@@ -3732,6 +4007,7 @@
         // A user-initiated turn just began (live send, or a plan-verdict
         // follow-up). Show "Grokking…" until the first real content replaces it.
         // The silent primer never emits agentStart, so it never shows here.
+        state.turnAgentActionsEl = null; // new turn → previous turn keeps its footer
         showGrokking();
         // Busy is event-sourced through the session buffer so a re-focus lands
         // on the true state: agentStart marks a turn in flight (a live send
@@ -3766,6 +4042,17 @@
           // it now at the bottom so we don't silently drop those plans.
           flushPlanHistory();
           flushPermissionHistory();
+          // A replayed delegation whose completion never reached the tool
+          // channel (Composer's Task completes only via live lifecycle events,
+          // which the CLI doesn't replay) must not keep dots running on
+          // history — settle any still-running subagent rows quietly.
+          for (const el of state.subagentCards.values()) {
+            const dots = el.querySelector(".blink-dots");
+            if (dots) dots.remove();
+          }
+          // The final replayed turn has no explicit turn-end signal — its
+          // footer becomes final here.
+          revealTurnFooter();
         }
         break;
       case "permissionHistoryQueue":
@@ -3834,6 +4121,16 @@
           }
           break;
         }
+        // A subagent's update belongs to its own row (title refinement, then the
+        // completed result + duration) — never the generic tool group.
+        if (state.subagentCards.has(msg.call?.toolCallId)) {
+          applySubagentUpdate(msg.call);
+          break;
+        }
+        // Background-delegation results ride the poller's TaskOutput — finish
+        // the matching card, then let the update flow on to the poller's own
+        // generic row.
+        maybeFinishSubagentFromTaskOutput(msg.call);
         // Fallback: a replayed answer update with no matching card (tool_call
         // missing/unmatched). Rebuild a card from the result text rather than
         // leaving the resumed turn blank.
@@ -3854,6 +4151,34 @@
         applyToolDiffs(msg.call);
         break;
       }
+      case "subagentUpdate": {
+        // Lifecycle stream (method _x.ai/session/update): subagent_spawned tags
+        // the card with the child id; subagent_finished carries duration_ms +
+        // the child's output — the duration Composer's completed
+        // tool_call_update lacks, and a completion backstop if the tool
+        // channel's update never lands.
+        const u = msg.update || {};
+        const cards = [...state.subagentCards.values()];
+        if (u.sessionUpdate === "subagent_spawned") {
+          // FIFO: spawn events arrive in the same order as their tool_calls.
+          // Done-ness is irrelevant — the tool channel's completion can race
+          // ahead of the lifecycle stream.
+          const el = cards.find((c) => !c.dataset.subagentId);
+          if (el) el.dataset.subagentId = String(u.subagent_id || "");
+        } else if (u.sessionUpdate === "subagent_finished") {
+          let el = u.subagent_id
+            ? cards.find((c) => c.dataset.subagentId === String(u.subagent_id))
+            : undefined;
+          if (!el) el = cards.filter((c) => !c.classList.contains("subagent-done")).pop();
+          if (el) {
+            finishSubagentCard(el, {
+              durationMs: typeof u.duration_ms === "number" ? u.duration_ms : null,
+              output: typeof u.output === "string" ? u.output : "",
+            });
+          }
+        }
+        break;
+      }
       case "permissionRequest":
         addPermissionCard(msg.req);
         break;
@@ -3872,6 +4197,15 @@
       case "exitPlanRequest":
         addPlanCard(msg.req);
         break;
+      case "planResolved": {
+        // Replayed (on re-focus) right after the buffered exitPlanRequest, or
+        // live right after the user's verdict — collapse the matching card if
+        // it's still actionable. Idempotent: a live click already collapsed it.
+        const cards = [...messagesEl.querySelectorAll(".card.plan")];
+        const el = cards.find((c) => c.dataset.planReqId === String(msg.requestId) && !c.classList.contains("resolved"));
+        if (el) resolvePlanCardEl(el, msg.verdict);
+        break;
+      }
       case "questionRequest":
         addQuestionCard(msg.req);
         break;
@@ -3896,11 +4230,24 @@
         // turn ends emitting promptComplete; afterTurn's follow-up turn then
         // runs and emits its own agentEnd at the end, which clears busy).
         commitAgentTurn();
-        // != null, not truthy: a native /compact reports totalTokens 0 (context
-        // reset). Swallowing the 0 froze the donut at the pre-compact value —
-        // the "did /compact even work?" report. Zero renders an empty ring
-        // until the next turn reports the real post-compact size.
+        revealTurnFooter(); // the turn is over — show its copy/timestamp footer
+        // The host strips totalTokens:0 before it gets here — grok reports 0
+        // for /session-info (context untouched) AND /compact (context shrunk,
+        // not emptied), so 0 is never a real measurement (gateZeroTokenMeta,
+        // #39). Absent totalTokens = "no update": the donut keeps its last
+        // real value — the CLI doesn't recompute the count until the NEXT
+        // turn ends (research/signals-refresh-probe.cjs), which then updates
+        // it via its own meta or the host's contextUsage read.
         if (msg.meta?.totalTokens != null) updateDonut(msg.meta.totalTokens);
+        break;
+      case "contextUsage":
+        // Read from grok's on-disk signals.json by the host — a real count for
+        // the cases the turn meta can't cover: cold restore (donut would sit
+        // at 0 until the first turn) and zero-reporting turns where signals
+        // holds a fresher count than the last meta (e.g. /session-info right
+        // after a /compact).
+        if (msg.window) state.contextWindow = msg.window;
+        updateDonut(msg.used);
         break;
       case "agentReset": {
         hidePlanProcessing(); // turn is being reset, indicator no longer applies
@@ -3927,6 +4274,8 @@
       case "agentError":
         hideGrokking(); // turn ended (possibly before any content)
         hideThinkingIndicator();
+        hidePlanProcessing();
+        revealTurnFooter();
         addError(msg.text);
         state.busy = false;
         updateSendButton();
@@ -3934,11 +4283,17 @@
       case "agentEnd":
         hideGrokking(); // turn ended (defensive — content normally clears it first)
         hideThinkingIndicator();
+        // A turn that ends with NO content (grok's [Plan cancelled] ack can be
+        // empty) would otherwise orphan the dots forever — content-based
+        // clearing never fires.
+        hidePlanProcessing();
+        revealTurnFooter();
         state.busy = false;
         updateSendButton();
         break;
       case "exit":
         hideGrokking();
+        hidePlanProcessing();
         addError(`Grok exited (code ${msg.code}). Click the new session button to restart.`);
         state.busy = false;
         updateSendButton();
@@ -3990,13 +4345,6 @@
       case "sessionContext":
         addSessionContextBanner();
         break;
-      case "contextUsage":
-        // Real count read from grok's on-disk signals.json by the host. Covers
-        // what the turn meta can't: a cold restore, where no turn has run yet
-        // and the donut would otherwise sit at 0 until the first message.
-        if (msg.window) state.contextWindow = msg.window;
-        updateDonut(msg.used);
-        break;
       case "clearMessages":
         resetForNewSession();
         break;
@@ -4040,6 +4388,10 @@
         state.dots = Object.assign({}, state.dots, msg.dots || {});
         if (msg.total !== undefined) state.sessionTotal = msg.total;
         state.sessionHasMore = !!msg.hasMore;
+        // Where the next load-more should start: index slots CONSUMED by the host
+        // (hidden subagent sessions occupy slots without producing rows), so a
+        // filtered page never makes us re-request the same slice.
+        state.sessionNextOffset = typeof msg.nextOffset === "number" ? msg.nextOffset : null;
         state.sessionLoading = false;
         if (open) renderSessionRows();
         break;
@@ -4093,8 +4445,13 @@
   if (welcomeAboutLink) welcomeAboutLink.onclick = (e) => { e.preventDefault(); e.stopPropagation(); openAboutPanel(); };
   addBtn.onclick = (e) => { e.stopPropagation(); openAddPopover(); };
   historyBtn.onclick = (e) => { e.stopPropagation(); openHistoryPopover(); };
+  donutEl.onclick = (e) => {
+    e.stopPropagation();
+    if (contextPopover.hidden) openContextPopover(); else closePopovers();
+  };
   modePopover.addEventListener("click", (e) => e.stopPropagation());
   gearPopover.addEventListener("click", (e) => e.stopPropagation());
+  contextPopover.addEventListener("click", (e) => e.stopPropagation());
   addPopover.addEventListener("click", (e) => e.stopPropagation());
   historyPopover.addEventListener("click", (e) => e.stopPropagation());
   document.addEventListener("click", (e) => {
@@ -4120,15 +4477,11 @@
       // spans with no literal newlines, still copy as one line per row.
       const text = codeEl ? codeEl.innerText : "";
       navigator.clipboard.writeText(text).then(() => {
-        const label = copyBtn.querySelector(".code-copy-label");
         const glyph = copyBtn.querySelector(".code-copy-glyph");
-        const prevLabel = label ? label.textContent : "";
         const prevGlyph = glyph ? glyph.innerHTML : "";
-        if (label) label.textContent = "Copied";
         if (glyph) glyph.innerHTML = ICON.check;
         copyBtn.classList.add("copied");
         setTimeout(() => {
-          if (label) label.textContent = prevLabel;
           if (glyph) glyph.innerHTML = prevGlyph;
           copyBtn.classList.remove("copied");
         }, 1500);

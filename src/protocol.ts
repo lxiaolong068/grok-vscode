@@ -84,10 +84,17 @@ export type HostMsg =
   // The host spreads the plan-review snapshot (planPath/planName) into the bare
   // ExitPlanRequest before posting, so the wire shape is wider than acp's type.
   | { type: "exitPlanRequest"; req: ExitPlanRequest & { planPath?: string; planName?: string } }
+  // Buffered right after the user's verdict (mirrors permissionResolved) so a
+  // re-focus replays the plan card collapsed instead of actionable.
+  | { type: "planResolved"; requestId: number | string; verdict: "approved" | "abandoned" | "rejected" }
   | { type: "questionRequest"; req: QuestionRequest }
   | { type: "planNotice"; text: string }
   | { type: "planBlocked"; kind: string; target: string }
   | { type: "promptComplete"; meta: PromptResultMeta }
+  // Context size read from grok's on-disk signals.json — the source that has a
+  // real count when the turn meta can't: a cold restore (no turn yet) and a
+  // /compact turn (its meta reports 0, stripped by gateZeroTokenMeta).
+  | { type: "contextUsage"; used: number; window?: number }
   | { type: "agentReset" }
   | { type: "agentError"; text: string }
   | { type: "agentEnd"; meta?: PromptResultMeta }
@@ -95,15 +102,18 @@ export type HostMsg =
   | { type: "setBusy"; value: boolean; locked?: boolean }
   | { type: "summarizing" }
   | { type: "sessionContext" }
-  // Real context size read from grok's on-disk signals.json — covers the cases
-  // the ACP turn meta can't: a cold restore (no turn has run, donut would sit
-  // at 0) and zero-reporting turns (stripped by gateZeroTokenMeta).
-  | { type: "contextUsage"; used: number; window?: number }
   | { type: "clearMessages" }
   | { type: "onboarding"; state: "missing-cli" | "auth-required"; platform?: string }
   | { type: "error"; text: string }
   | { type: "xaiNotification"; update?: unknown }
-  | { type: "sessions"; entries: SessionListEntry[]; activeId?: string; dots: Record<string, Dot>; offset: number; total: number; hasMore: boolean; query: string }
+  // Subagent lifecycle (method _x.ai/session/update): subagent_spawned /
+  // subagent_finished — duration/output stats the Composer agent's completed
+  // tool_call_update lacks, and a completion backstop for the card.
+  | { type: "subagentUpdate"; update?: unknown }
+  // nextOffset = the index offset the next load-more should request — ids CONSUMED
+  // from the on-disk index, not entries shown (hidden subagent sessions occupy
+  // slots without producing rows).
+  | { type: "sessions"; entries: SessionListEntry[]; activeId?: string; dots: Record<string, Dot>; offset: number; total: number; hasMore: boolean; nextOffset: number; query: string }
   | { type: "sessionDot"; id: string; dot: Dot }
   // Full snapshot of the focused session's host-owned send queue (#37) — the
   // webview renders pending user blocks from this; replay rebuilds them.
@@ -169,11 +179,11 @@ const HOST_MESSAGE_TYPE_MAP: Record<HostMsg["type"], true> = {
   thoughtChunk: true, messageChunk: true, media: true, userMessageChunk: true,
   historyReplay: true, permissionHistoryQueue: true, planHistoryQueue: true,
   planProcessing: true, toolCall: true, toolCallUpdate: true, permissionRequest: true,
-  permissionResolved: true, exitPlanRequest: true, questionRequest: true,
-  planNotice: true, planBlocked: true, promptComplete: true, agentReset: true,
+  permissionResolved: true, exitPlanRequest: true, planResolved: true, questionRequest: true,
+  planNotice: true, planBlocked: true, promptComplete: true, contextUsage: true, agentReset: true,
   agentError: true, agentEnd: true, exit: true, setBusy: true, summarizing: true,
-  sessionContext: true, contextUsage: true, clearMessages: true, onboarding: true, error: true,
-  xaiNotification: true, sessions: true, sessionDot: true, queuedSends: true,
+  sessionContext: true, clearMessages: true, onboarding: true, error: true,
+  xaiNotification: true, subagentUpdate: true, sessions: true, sessionDot: true, queuedSends: true,
 };
 
 const WEBVIEW_MESSAGE_TYPE_MAP: Record<WebviewMsg["type"], true> = {

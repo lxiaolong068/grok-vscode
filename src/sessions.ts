@@ -17,6 +17,10 @@ export interface SessionListEntry {
   createdAt: number;
   numMessages: number;
   modelId?: string;
+  /** grok's `session_kind` when it marks a non-user session — a `spawn_subagent`
+   *  delegation persists its child as a top-level session dir with
+   *  `session_kind: "subagent"`; the history list hides those. */
+  kind?: "subagent";
 }
 
 export interface SessionMetaOverride {
@@ -132,7 +136,8 @@ function buildEntry(
   const override = overrides[id];
   const customName = override?.customName?.trim() || undefined;
   const displayName = customName || fallbackName(rawSummary, updatedAt);
-  return { id, cwd: sessCwd, displayName, rawSummary, customName, updatedAt, createdAt, numMessages, modelId };
+  const kind = raw?.session_kind === "subagent" ? ("subagent" as const) : undefined;
+  return { id, cwd: sessCwd, displayName, rawSummary, customName, updatedAt, createdAt, numMessages, modelId, kind };
 }
 
 export interface SessionIndexEntry {
@@ -215,6 +220,26 @@ export function readSessionEntries(deps: ReadEntriesDeps): SessionListEntry[] {
   return out;
 }
 
+/** Read enough index slots to fill one user-visible page, skipping subagent children and unreadable
+ *  summaries while advancing by every consumed slot. */
+export function readUserSessionPage(
+  index: SessionIndexEntry[],
+  offset: number,
+  limit: number,
+  readEntries: (ids: string[]) => SessionListEntry[],
+): { entries: SessionListEntry[]; nextOffset: number } {
+  const entries: SessionListEntry[] = [];
+  let nextOffset = Math.max(0, offset);
+  while (entries.length < limit && nextOffset < index.length) {
+    const remaining = limit - entries.length;
+    const ids = index.slice(nextOffset, nextOffset + remaining).map((e) => e.id);
+    if (!ids.length) break;
+    nextOffset += ids.length;
+    entries.push(...readEntries(ids).filter((e) => e.kind !== "subagent"));
+  }
+  return { entries, nextOffset };
+}
+
 export interface ContextUsage {
   used: number;
   window?: number;
@@ -222,10 +247,12 @@ export interface ContextUsage {
 
 /** Read grok's persisted context usage from a session's `signals.json`
  *  (`contextTokensUsed` / `contextWindowTokens`). grok rewrites the file at the
- *  end of every turn, so it's the only source of a real count before any live
- *  turn has run — i.e. on a cold restore, where the ACP turn meta hasn't
- *  reported yet and the donut would otherwise sit at 0. Null when the file is
- *  missing/unreadable or the count isn't a positive number. Pure. */
+ *  end of every turn — including a `/compact` turn — so it carries the real
+ *  post-compact size that the ACP result meta doesn't (grok reports
+ *  `totalTokens: 0` there, which the host strips; see `gateZeroTokenMeta`).
+ *  It's also the only source of a count before any live turn has run, i.e. on
+ *  a cold restore. Null when the file is missing/unreadable or the count isn't
+ *  a positive number. Pure. */
 export function readContextUsage(deps: { fs: FsLike; grokHome: string; cwd: string; id: string }): ContextUsage | null {
   const { fs, grokHome, cwd, id } = deps;
   const signalsPath = path.join(sessionsDirFor(grokHome, cwd), id, "signals.json");

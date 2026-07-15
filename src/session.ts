@@ -71,6 +71,14 @@ export class Session {
   suppressContent = false;
 
   /**
+   * When set (to ""), the sidebar's messageChunk handler accumulates the
+   * agent's streamed text here instead of only forwarding it — used by hidden
+   * host-initiated turns that need the reply (the post-/compact /session-info,
+   * whose text carries the fresh context count). undefined = no capture.
+   */
+  captureAgentText?: string;
+
+  /**
    * Plan-reject specific suppression: drop streaming output (the false-approval
    * ramble) but let lifecycle events through so the webview clears `busy` and
    * re-enables the send button when the cancelled turn finally ends.

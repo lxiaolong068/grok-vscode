@@ -130,30 +130,148 @@ describe("addGeneratedMedia (remote link fallback)", () => {
   });
 });
 
-describe("addSubagentCard (spawn_subagent tool call)", () => {
-  it("renders a 'Subagent: <type>' card and skips the generic tool group", () => {
+describe("subagent row (spawn_subagent tool call, grok 0.2.93 wire shape)", () => {
+  // Real spawn shape captured over ACP (research/signals-refresh-probe run +
+  // research/subagents.md): rawInput carries the task description + type.
+  const SPAWN = {
+    toolCallId: "sa-1",
+    title: "spawn_subagent",
+    rawInput: {
+      prompt: "Read the file math.js and report back in one sentence",
+      description: "Read math.js and summarize add() in one sentence",
+      subagent_type: "general-purpose",
+      background: false,
+    },
+  };
+  // Real completed update: re-titled to the description, structured rawOutput.
+  const COMPLETED = {
+    toolCallId: "sa-1",
+    status: "completed",
+    title: "Read math.js and summarize add() in one sentence",
+    content: [{ type: "content", content: { type: "text", text: "The add() function returns the sum.\n\n<subagent_meta>id=x, type=general-purpose</subagent_meta>" } }],
+    rawOutput: {
+      type: "SubagentCompleted",
+      output: "The add() function returns the sum.",
+      subagent_type: "general-purpose",
+      tool_calls: 2,
+      turns: 1,
+      duration_ms: 7343,
+    },
+  };
+
+  it("renders the task description with running dots, diverted from the tool group", () => {
     const { window, doc } = bootWebview();
-    // grok 0.2.33 confirmed shape (research/subagents.md)
+    dispatch(window, { type: "toolCall", call: SPAWN });
+
+    const card = messages(doc).querySelector(".subagent-card")!;
+    expect(card).not.toBeNull();
+    expect(card.textContent).toContain("Subagent");
+    expect(card.textContent).toContain("Read math.js and summarize add() in one sentence");
+    expect(card.querySelector(".blink-dots")).not.toBeNull();
+    expect(messages(doc).querySelector(".tool-group")).toBeNull();
+  });
+
+  it("the completed update stops the dots, stamps the duration, and offers the result on click", () => {
+    const { window, doc } = bootWebview();
+    dispatch(window, { type: "toolCall", call: SPAWN });
+    dispatch(window, { type: "toolCallUpdate", call: COMPLETED });
+
+    const card = messages(doc).querySelector(".subagent-card")!;
+    expect(card.classList.contains("subagent-done")).toBe(true);
+    expect(card.querySelector(".blink-dots")).toBeNull();
+    expect(card.querySelector(".subagent-time")!.textContent).toBe("· 7s");
+    // the update must NOT leak into the generic tool group
+    expect(messages(doc).querySelector(".tool-group")).toBeNull();
+
+    const body = card.querySelector(".subagent-result") as HTMLElement;
+    expect(body.hidden).toBe(true);
+    // Rendered as markdown; the <subagent_meta> plumbing is stripped.
+    expect(body.textContent).toContain("The add() function returns the sum.");
+    expect(body.textContent).not.toContain("subagent_meta");
+    click(window, card.querySelector(".subagent-row")!);
+    expect(body.hidden).toBe(false);
+  });
+
+  it("fills missing output from a lifecycle event that arrives after tool completion", () => {
+    const { window, doc } = bootWebview();
+    dispatch(window, { type: "toolCall", call: SPAWN });
+    dispatch(window, {
+      type: "toolCallUpdate",
+      call: { toolCallId: "sa-1", status: "completed", rawOutput: { type: "Text", text: "" } },
+    });
+
+    const card = messages(doc).querySelector(".subagent-card")!;
+    expect(card.classList.contains("subagent-done")).toBe(true);
+    expect(card.querySelector(".subagent-result")!.textContent).toBe("");
+
+    dispatch(window, {
+      type: "subagentUpdate",
+      update: { sessionUpdate: "subagent_spawned", subagent_id: "child-1" },
+    });
+    dispatch(window, {
+      type: "subagentUpdate",
+      update: {
+        sessionUpdate: "subagent_finished",
+        subagent_id: "child-1",
+        duration_ms: 2500,
+        output: "Late lifecycle result",
+      },
+    });
+
+    expect(card.querySelector(".subagent-time")!.textContent).toBe("· 3s");
+    expect(card.querySelector(".subagent-result")!.textContent).toContain("Late lifecycle result");
+    expect(card.querySelector(".subagent-row")!.classList.contains("expandable")).toBe(true);
+  });
+
+  it("a generic 'Subagent' title is noise — the first prompt line stands in", () => {
+    const { window, doc } = bootWebview();
     dispatch(window, {
       type: "toolCall",
       call: {
-        toolCallId: "sa-1",
+        toolCallId: "sa-3",
+        title: "Subagent",
+        rawInput: { subagent_type: "general-purpose", prompt: "List the repo root and count .ts files under src/\nThen report back." },
+      },
+    });
+    const card = messages(doc).querySelector(".subagent-card")!;
+    expect(card.textContent).toContain("List the repo root and count .ts files under src/");
+    // no "Subagent · Subagent" duplication
+    expect(card.querySelector(".subagent-title")!.textContent).not.toBe("Subagent");
+  });
+
+  it("a replayed one-shot tool_call that is already completed renders done immediately", () => {
+    const { window, doc } = bootWebview();
+    dispatch(window, { type: "toolCall", call: { ...SPAWN, ...COMPLETED } });
+
+    const card = messages(doc).querySelector(".subagent-card")!;
+    expect(card.classList.contains("subagent-done")).toBe(true);
+    expect(card.querySelector(".blink-dots")).toBeNull();
+    expect(card.querySelector(".subagent-result")!.textContent).toContain("returns the sum");
+  });
+
+  it("falls back to the prompt's first line, then the subagent type", () => {
+    const { window, doc } = bootWebview();
+    dispatch(window, {
+      type: "toolCall",
+      call: {
+        toolCallId: "sa-2",
         title: "spawn_subagent",
         rawInput: { subagent_type: "general-purpose", prompt: "investigate the parser" },
       },
     });
+    expect(messages(doc).querySelector(".subagent-card")!.textContent).toContain("investigate the parser");
 
-    const card = messages(doc).querySelector(".subagent-card");
-    expect(card).not.toBeNull();
-    expect(card!.textContent).toContain("Subagent: general-purpose");
-    // a subagent call must be diverted away from the generic tool group
-    expect(messages(doc).querySelector(".tool-group")).toBeNull();
+    // Neither description nor prompt → the type is the last resort.
+    dispatch(window, {
+      type: "toolCall",
+      call: { toolCallId: "sa-2b", title: "spawn_subagent", rawInput: { subagent_type: "general-purpose" } },
+    });
+    const cards = messages(doc).querySelectorAll(".subagent-card");
+    expect(cards[cards.length - 1].textContent).toContain("general-purpose");
   });
 
-  it("renders a card for grok 0.2.x's background-task delegation (real subagent mechanism)", () => {
+  it("still cards grok's legacy background-task delegation, labeled by its command", () => {
     const { window, doc } = bootWebview();
-    // No spawn_subagent on the native build — a delegation is a backgrounded
-    // run_terminal_command (research/subagents.md § Ground truth).
     dispatch(window, {
       type: "toolCall",
       call: {
@@ -163,9 +281,9 @@ describe("addSubagentCard (spawn_subagent tool call)", () => {
       },
     });
 
-    const card = messages(doc).querySelector(".subagent-card");
-    expect(card).not.toBeNull();
-    expect(card!.textContent).toContain("Subagent: investigate the parser");
+    const card = messages(doc).querySelector(".subagent-card")!;
+    expect(card.textContent).toContain("Subagent");
+    expect(card.textContent).toContain("investigate the parser");
     expect(messages(doc).querySelector(".tool-group")).toBeNull();
   });
 

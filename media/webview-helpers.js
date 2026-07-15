@@ -20,9 +20,9 @@
     "voiceError", "chips", "commandsUpdate", "userMessage", "agentStart", "thoughtChunk",
     "messageChunk", "media", "userMessageChunk", "historyReplay", "permissionHistoryQueue",
     "planHistoryQueue", "planProcessing", "toolCall", "toolCallUpdate", "permissionRequest",
-    "permissionResolved", "exitPlanRequest", "questionRequest", "planNotice", "planBlocked",
-    "promptComplete", "agentReset", "agentError", "agentEnd", "exit", "setBusy", "summarizing",
-    "sessionContext", "contextUsage", "clearMessages", "onboarding", "error", "xaiNotification", "sessions",
+    "permissionResolved", "exitPlanRequest", "planResolved", "questionRequest", "planNotice", "planBlocked",
+    "promptComplete", "contextUsage", "agentReset", "agentError", "agentEnd", "exit", "setBusy", "summarizing",
+    "sessionContext", "clearMessages", "onboarding", "error", "xaiNotification", "subagentUpdate", "sessions",
     "sessionDot", "queuedSends",
   ];
   const WEBVIEW_MESSAGE_TYPES = [
@@ -155,16 +155,36 @@
   // excluded or it false-fires a card on the poller. See research/subagents.md
   // for the wire capture. Degrades gracefully (no match → the call stays in the
   // generic tool group).
+  // EXACT tool names only (normalized: separators stripped, lowercased).
+  // Titles routinely embed user content — grok titles a Grep call with its
+  // query and a Read with its filename — so substring matching false-cards
+  // ordinary tools the moment the user works ON subagent code (a search for
+  // "isSubagentToolCall" produced a fake Subagent card).
+  const SUBAGENT_TOOL_NAMES = new Set([
+    "spawnsubagent", "subagent", "runsubagent", "spawnagent", "launchagent",
+    "dispatchagent", "runagent", "delegate", "delegatetask", "task", "agent", "agents",
+  ]);
+
   function isSubagentToolCall(call) {
     if (!call) return false;
     if (call.kind === "subagent" || call.kind === "agent") return true;
+    // Structural marker on grok 0.2.9x: _meta["x.ai/tool"].name carries the
+    // real tool id regardless of how the call is titled — and when present it
+    // is AUTHORITATIVE both ways. grok-build names its delegation tool
+    // "spawn_subagent", the Composer agent names it "Task"; anything else
+    // (Grep/Read/…) is NOT a delegation no matter what the title says — grok
+    // titles a Grep with its search pattern, so a grep FOR "spawn_subagent"
+    // is titled exactly "spawn_subagent" (captured in
+    // test/fixtures/composer-subagent-session.jsonl).
+    const metaTool = call._meta && call._meta["x.ai/tool"];
+    const metaName = metaTool && String(metaTool.name || "").replace(/[_\s-]/g, "").toLowerCase();
+    if (metaName) return metaName === "spawnsubagent" || metaName === "task";
     const n = String(call.tool || call.name || call.title || "")
       .replace(/[_\s-]/g, "").toLowerCase();
     // grok's `get_command_or_subagent_output` polls a background task's output —
     // its name carries "subagent" but it is NOT a delegation, so never card it.
     if (/output$/.test(n) || n.startsWith("getcommand")) return false;
-    if (/subagent|spawnagent|launchagent|dispatchagent|runagent|delegat/.test(n)) return true;
-    if (n === "task" || n === "agent" || n === "agents") return true;
+    if (SUBAGENT_TOOL_NAMES.has(n)) return true;
     const r = call.rawInput || call.input || {};
     if (r.subagent_type || r.subagentType || r.subagent ||
       r.agent_type || r.agentType || r.agent) return true;
@@ -177,6 +197,27 @@
     if (r.is_background === true || r.background === true) return true;
     if (/^\s*\[bg\]/i.test(String(call.title || ""))) return true;
     return false;
+  }
+
+  // Strip the CLI's envelope from a subagent result so the card shows the
+  // child's actual words: <subagent_meta>/<subagent_result> plumbing blocks,
+  // the leading "This is the output of the subagent:" / "response:" lines, ONE
+  // wrapping <response>…</response> pair, and the trailing "Agent ID: …
+  // (resume …)" hint. Every pattern is anchored to the leading/trailing
+  // position, so identical text mid-answer survives untouched.
+  function cleanSubagentOutput(text) {
+    let s = String(text == null ? "" : text)
+      .replace(/<subagent_(meta|result)>[\s\S]*?<\/subagent_\1>/g, "")
+      .replace(/<\/?subagent_(meta|result)>/g, "")
+      .trim();
+    s = s.replace(/^this is the output of the subagent:\s*/i, "");
+    s = s.replace(/^response:\s*/i, "");
+    // The Agent ID hint trails AFTER </response>, so strip it before the
+    // end-anchored wrapping-pair check.
+    s = s.replace(/\n\s*agent id:\s*[0-9a-f][0-9a-f-]*\s*(\([^)]*\))?\s*$/i, "").trim();
+    const wrapped = /^<response>\s*([\s\S]*?)\s*<\/response>$/i.exec(s);
+    if (wrapped) s = wrapped[1];
+    return s.trim();
   }
 
   // Human label for a subagent card: the agent type grok delegated to
@@ -394,7 +435,7 @@
     return { body: rest.trim(), images: [...leading, ...trailing] };
   }
 
-  const api = { FILE_EXTS, HOST_MESSAGE_TYPES, WEBVIEW_MESSAGE_TYPES, isKnownHostMessage, looksLikeFileRef, formatRelativeTime, modelDisplayName, MIC_STATES, nextMicState, trailingSendPhrase, buildQuestionAnswers, isSubagentToolCall, subagentLabel, shouldStickToBottom, splitMath, stripUnsupportedTex, toolFailureText, parseAttachmentContext, parseSelectionBlocks, parseImageTags };
+  const api = { FILE_EXTS, HOST_MESSAGE_TYPES, WEBVIEW_MESSAGE_TYPES, isKnownHostMessage, looksLikeFileRef, formatRelativeTime, modelDisplayName, MIC_STATES, nextMicState, trailingSendPhrase, buildQuestionAnswers, isSubagentToolCall, subagentLabel, cleanSubagentOutput, shouldStickToBottom, splitMath, stripUnsupportedTex, toolFailureText, parseAttachmentContext, parseSelectionBlocks, parseImageTags };
 
   if (typeof module !== "undefined" && module.exports) {
     module.exports = api;

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 // @ts-expect-error — plain JS module, no types
-import { looksLikeFileRef, formatRelativeTime, FILE_EXTS, modelDisplayName, nextMicState, trailingSendPhrase, buildQuestionAnswers, isSubagentToolCall, subagentLabel, shouldStickToBottom, splitMath, stripUnsupportedTex, parseAttachmentContext, parseSelectionBlocks, parseImageTags } from "../media/webview-helpers.js";
+import { looksLikeFileRef, formatRelativeTime, FILE_EXTS, modelDisplayName, nextMicState, trailingSendPhrase, buildQuestionAnswers, isSubagentToolCall, subagentLabel, cleanSubagentOutput, shouldStickToBottom, splitMath, stripUnsupportedTex, parseAttachmentContext, parseSelectionBlocks, parseImageTags } from "../media/webview-helpers.js";
 import { buildPrompt, buildPromptWithImages } from "../src/prompt-builder";
 import { makeExplicitChip, makeImplicitChip, makeImageChip } from "../src/chips";
 
@@ -504,6 +504,66 @@ describe("isSubagentToolCall", () => {
     expect(isSubagentToolCall({ tool: "bash", kind: "execute" })).toBe(false);
     expect(isSubagentToolCall(null)).toBe(false);
     expect(isSubagentToolCall({})).toBe(false);
+  });
+
+  it("does NOT match tools whose titles merely CONTAIN 'subagent' (working on subagent code)", () => {
+    // Real false positive: grok titles a Grep call with its search query and a
+    // Read with its filename — substring matching turned both into fake cards.
+    expect(isSubagentToolCall({ title: "isSubagentToolCall", kind: "search" })).toBe(false);
+    expect(isSubagentToolCall({ title: "Search isSubagentToolCall" })).toBe(false);
+    expect(isSubagentToolCall({ title: "Read research/subagents.md", kind: "read" })).toBe(false);
+    expect(isSubagentToolCall({ title: "Edit addSubagentCard in chat.js", kind: "edit" })).toBe(false);
+  });
+
+  it("matches the structural _meta marker regardless of title (grok 0.2.9x)", () => {
+    expect(isSubagentToolCall({
+      title: "whatever grok titles it",
+      _meta: { "x.ai/tool": { name: "spawn_subagent", kind: "task", label: "Subagent" } },
+    })).toBe(true);
+  });
+
+  it("_meta is authoritative BOTH ways — a Grep titled 'spawn_subagent' is not a delegation", () => {
+    // Captured live (test/fixtures/composer-subagent-session.jsonl): grok
+    // titles a Grep with its search pattern, so a grep FOR "spawn_subagent"
+    // is titled exactly "spawn_subagent". Only _meta tells the truth.
+    expect(isSubagentToolCall({ title: "spawn_subagent", _meta: { "x.ai/tool": { name: "Grep" } } })).toBe(false);
+    expect(isSubagentToolCall({ title: "isSubagentToolCall", _meta: { "x.ai/tool": { name: "Grep" } } })).toBe(false);
+    // The Composer agent's delegation tool is named "Task".
+    expect(isSubagentToolCall({ title: "Task", _meta: { "x.ai/tool": { name: "Task" } } })).toBe(true);
+  });
+});
+
+describe("cleanSubagentOutput", () => {
+  it("strips the full CLI envelope (verbatim shape from a real background delegation)", () => {
+    const raw =
+      "This is the output of the subagent:\n\n" +
+      "response:\n<response>\n" +
+      "```json\n{ \"rootFileCount\": 37 }\n```\n\n**Notes:**\n- counts include dirs\n" +
+      "</response>\n\n" +
+      "Agent ID: 019f52c8-67d6-7b13-a335-fea6d5e218cd (can be used with the resume parameter to send a follow-up after it completes)";
+    const cleaned = cleanSubagentOutput(raw);
+    expect(cleaned).toBe("```json\n{ \"rootFileCount\": 37 }\n```\n\n**Notes:**\n- counts include dirs");
+  });
+
+  it("strips <subagent_meta>/<subagent_result> blocks and unpaired leftovers", () => {
+    expect(cleanSubagentOutput("The answer.\n\n<subagent_meta>id=x, tool_calls=2</subagent_meta>")).toBe("The answer.");
+    expect(cleanSubagentOutput("The answer.\n\n</subagent_result>")).toBe("The answer.");
+  });
+
+  it("leaves plain prose untouched, including envelope-like text mid-answer", () => {
+    expect(cleanSubagentOutput("The add() function returns the sum.")).toBe("The add() function returns the sum.");
+    const mid = "Step 1: wrap the payload in <response> tags.\nStep 2: read the response: field.";
+    expect(cleanSubagentOutput(mid)).toBe(mid);
+  });
+
+  it("does not strip an unmatched <response> (only a full wrapping pair)", () => {
+    const truncated = "<response>\npartial output that got cut off";
+    expect(cleanSubagentOutput(truncated)).toBe(truncated);
+  });
+
+  it("handles null/empty", () => {
+    expect(cleanSubagentOutput(null)).toBe("");
+    expect(cleanSubagentOutput("")).toBe("");
   });
 
   it("does NOT match grok's get_command_or_subagent_output poller", () => {

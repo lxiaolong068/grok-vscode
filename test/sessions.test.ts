@@ -12,7 +12,9 @@ import {
   indexSessions,
   isEmptyPrimerSession,
   listSessions,
+  readContextUsage,
   readSessionEntries,
+  readUserSessionPage,
   sessionsDirFor,
 } from "../src/sessions";
 
@@ -551,5 +553,113 @@ describe("carrySessionName", () => {
     const overrides: SessionMetaOverrides = { old: { customName: "   " } };
     const next = carrySessionName(overrides, "old", "new");
     expect(next.new).toBeUndefined();
+  });
+});
+
+describe("subagent child sessions (session_kind)", () => {
+  const dir = sessionsDirFor(grokHome, cwd);
+
+  it("marks a session_kind:subagent summary so the history list can hide it", () => {
+    const fs = buildFs({
+      [path.join(dirFor("child"), "summary.json")]: {
+        isDir: false,
+        // Real child-session summary shape (grok 0.2.93): session_kind +
+        // agent_name identify the delegation workspace.
+        content: JSON.stringify({
+          info: { id: "child", cwd },
+          session_summary: "Analyze add() function in math.js file",
+          session_kind: "subagent",
+          agent_name: "general-purpose",
+          updated_at: "2026-07-11T18:00:00Z",
+        }),
+      },
+      [path.join(dirFor("real"), "summary.json")]: {
+        isDir: false,
+        content: JSON.stringify({ info: { id: "real", cwd }, session_summary: "Fix the login bug", updated_at: "2026-07-11T18:00:00Z" }),
+      },
+      [dir]: { isDir: true },
+    });
+    const out = readSessionEntries({ fs, grokHome, cwd, ids: ["child", "real"], overrides: {} });
+    expect(out.find((e) => e.id === "child")?.kind).toBe("subagent");
+    expect(out.find((e) => e.id === "real")?.kind).toBeUndefined();
+  });
+
+  it("fills a visible page across runs of subagent children without skipping the next chat", () => {
+    const index = ["child-1", "real-1", "child-2", "real-2", "real-3"]
+      .map((id, i) => ({ id, mtimeMs: 100 - i }));
+    const read = (ids: string[]) => ids.map((id) => ({
+      id,
+      cwd,
+      displayName: id,
+      rawSummary: id,
+      updatedAt: 0,
+      createdAt: 0,
+      numMessages: 1,
+      kind: id.startsWith("child") ? ("subagent" as const) : undefined,
+    }));
+
+    const first = readUserSessionPage(index, 0, 2, read);
+    expect(first.entries.map((e) => e.id)).toEqual(["real-1", "real-2"]);
+    expect(first.nextOffset).toBe(4);
+
+    const second = readUserSessionPage(index, first.nextOffset, 2, read);
+    expect(second.entries.map((e) => e.id)).toEqual(["real-3"]);
+    expect(second.nextOffset).toBe(5);
+  });
+});
+
+describe("readContextUsage", () => {
+  const signalsPath = (id: string) => path.join(dirFor(id), "signals.json");
+
+  // Real signals.json shape (grok 0.2.x): flat JSON with contextTokensUsed /
+  // contextWindowTokens among many other counters. This sample mirrors a real
+  // post-compact capture: totalTokensBeforeCompaction > contextTokensUsed.
+  const realSignals = JSON.stringify({
+    turnCount: 19,
+    compactionCount: 1,
+    totalTokensBeforeCompaction: 40088,
+    contextWindowUsage: 14,
+    contextTokensUsed: 29088,
+    contextWindowTokens: 200000,
+    primaryModelId: "grok-composer-2.5-fast",
+  });
+
+  it("reads used + window from a real-shaped signals.json (post-compact value)", () => {
+    const fs = buildFs({ [signalsPath("s1")]: { isDir: false, content: realSignals } });
+    expect(readContextUsage({ fs, grokHome, cwd, id: "s1" })).toEqual({ used: 29088, window: 200000 });
+  });
+
+  it("returns null when the file is missing", () => {
+    const fs = buildFs({});
+    expect(readContextUsage({ fs, grokHome, cwd, id: "nope" })).toBeNull();
+  });
+
+  it("returns null on malformed JSON", () => {
+    const fs = buildFs({ [signalsPath("s1")]: { isDir: false, content: "{not json" } });
+    expect(readContextUsage({ fs, grokHome, cwd, id: "s1" })).toBeNull();
+  });
+
+  it("returns null when the count is missing, zero, or not a finite number", () => {
+    for (const bad of [
+      "{}",
+      JSON.stringify({ contextTokensUsed: 0, contextWindowTokens: 200000 }),
+      JSON.stringify({ contextTokensUsed: -5 }),
+      JSON.stringify({ contextTokensUsed: "29088" }),
+      JSON.stringify({ contextTokensUsed: null }),
+    ]) {
+      const fs = buildFs({ [signalsPath("s1")]: { isDir: false, content: bad } });
+      expect(readContextUsage({ fs, grokHome, cwd, id: "s1" })).toBeNull();
+    }
+  });
+
+  it("returns used without a window when contextWindowTokens is absent or invalid", () => {
+    for (const content of [
+      JSON.stringify({ contextTokensUsed: 1234 }),
+      JSON.stringify({ contextTokensUsed: 1234, contextWindowTokens: 0 }),
+      JSON.stringify({ contextTokensUsed: 1234, contextWindowTokens: "200000" }),
+    ]) {
+      const fs = buildFs({ [signalsPath("s1")]: { isDir: false, content } });
+      expect(readContextUsage({ fs, grokHome, cwd, id: "s1" })).toEqual({ used: 1234, window: undefined });
+    }
   });
 });

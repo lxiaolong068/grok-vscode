@@ -17,8 +17,30 @@ import { describe, it, expect } from "vitest";
 import {
   PlanEntry,
   appendPlanEntry,
+  countsAsUserBubble,
   decideRestoreState,
 } from "../src/plan-restore";
+
+describe("countsAsUserBubble (host↔webview replay-count parity)", () => {
+  // The host's replay counter must count exactly what chat.js appendUserChunk
+  // bubbles — an asymmetry inflates every post-restore verdict position and
+  // the plan/permission cards land at the END of the conversation on the next
+  // restore (the accredia stress session's "2 messages at the end").
+  it("counts real user messages, including verdicts WITH comments", () => {
+    expect(countsAsUserBubble("Show me a plan")).toBe(true);
+    expect(countsAsUserBubble("[Plan approved] I don't know what to do.")).toBe(true);
+    expect(countsAsUserBubble("[Plan rejected] use sqlite")).toBe(true);
+    expect(countsAsUserBubble('<vscode-context note="x">\nfile.ts\n</vscode-context>\n\nRevert that change')).toBe(true);
+  });
+
+  it("does NOT count what the webview never bubbles", () => {
+    expect(countsAsUserBubble("[Plan cancelled]")).toBe(false);
+    expect(countsAsUserBubble("  [Plan approved]  ")).toBe(false);
+    expect(countsAsUserBubble("[Plan rejected]\n")).toBe(false);
+    expect(countsAsUserBubble("<system-reminder>\n[Request interrupted by user]\n</system-reminder>")).toBe(false);
+    expect(countsAsUserBubble("  <system-reminder> Plan mode still active </system-reminder>")).toBe(false);
+  });
+});
 
 describe("appendPlanEntry", () => {
   it("creates a new list when none exists (undefined → [entry])", () => {

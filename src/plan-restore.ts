@@ -17,6 +17,29 @@
 
 export type PlanVerdict = "approved" | "rejected" | "abandoned";
 
+/**
+ * True when a REPLAYED user turn renders a user bubble in the webview. The
+ * host's replay counter (`session.userMessageCount`, sidebar.ts's
+ * userMessageChunk handler) must count exactly what the webview's
+ * appendUserChunk bubbles — persisted plan/permission `afterUserMessage`
+ * positions are drained against the webview's own count on the NEXT replay.
+ * Any asymmetry inflates the host count, and every verdict persisted after a
+ * restore then carries an unreachable position — its card permanently lands
+ * at the END of the conversation on later restores.
+ *
+ * Mirrors chat.js exactly: `<system-reminder>` turns and marker-only plan
+ * verdicts ("[Plan cancelled]" with no comment) render no bubble; a marker
+ * WITH a comment renders the comment (counts). The primer is handled
+ * separately (isPrimerText) by both sides.
+ */
+export function countsAsUserBubble(text: string): boolean {
+  const t = text ?? "";
+  if (/^\s*<system-reminder>/.test(t)) return false;
+  const m = /^\s*\[Plan (approved|rejected|cancelled)\]\s*/i.exec(t);
+  if (m && !t.slice(m[0].length).trim()) return false;
+  return true;
+}
+
 export interface PlanEntry {
   text: string;
   verdict: PlanVerdict;

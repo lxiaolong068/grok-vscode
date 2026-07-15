@@ -4,6 +4,7 @@ import {
   extractGeneratedMediaPaths,
   extractImageContent,
   extractPromptMeta,
+  gateZeroTokenMeta,
   isMediaGenToolCall,
   isIncompatibleAgentError,
   makeAckResponse,
@@ -13,6 +14,7 @@ import {
   makeQuestionResponse,
   makeRequest,
   parseAcpLine,
+  parseSessionInfoContext,
   permissionOutcomeFor,
   resolveModelId,
   routeSessionUpdate,
@@ -226,6 +228,57 @@ describe("extractPromptMeta", () => {
     const m = extractPromptMeta({});
     expect(m.totalTokens).toBeUndefined();
     expect(m.modelId).toBeUndefined();
+  });
+});
+
+describe("gateZeroTokenMeta (#39)", () => {
+  it("strips a totalTokens:0 report — /session-info and /compact both report 0 without the context being empty", () => {
+    const gated = gateZeroTokenMeta({ totalTokens: 0, inputTokens: 80, modelId: "grok-build" });
+    expect(gated?.totalTokens).toBeUndefined();
+    // The rest of the meta survives untouched.
+    expect(gated?.inputTokens).toBe(80);
+    expect(gated?.modelId).toBe("grok-build");
+  });
+
+  it("passes real counts through unchanged", () => {
+    const meta = { totalTokens: 44123, inputTokens: 80 };
+    expect(gateZeroTokenMeta(meta)).toBe(meta);
+  });
+
+  it("passes absent totalTokens through unchanged", () => {
+    const meta = { inputTokens: 80 };
+    expect(gateZeroTokenMeta(meta)).toBe(meta);
+  });
+});
+
+describe("parseSessionInfoContext (hidden post-/compact /session-info)", () => {
+  // Verbatim reply captured over ACP from grok 0.2.x
+  // (research/signals-refresh-probe.cjs).
+  const REAL_REPLY =
+    "**Title:** Context Size Probe With Seeded Reply Request\n\n" +
+    "**Session ID:** 019f5266-f0e3-75f3-a99f-13d40fbd1b28\n\n" +
+    "**Working directory:** C:\\Users\\Dell\\AppData\\Local\\Temp\\grok-signals-probe-dt7QZZ\n\n" +
+    "**Model:** grok-build\n\n**Turn:** 1\n\n" +
+    "**Context:** 16017 / 512000 tokens (3%)";
+
+  it("parses the real grok reply shape", () => {
+    expect(parseSessionInfoContext(REAL_REPLY)).toEqual({ used: 16017, window: 512000 });
+  });
+
+  it("tolerates unbolded / recased lines and thousands separators", () => {
+    expect(parseSessionInfoContext("context: 16,017 / 512,000 tokens (3%)")).toEqual({ used: 16017, window: 512000 });
+    expect(parseSessionInfoContext("CONTEXT:**1 / 200000 tokens")).toEqual({ used: 1, window: 200000 });
+  });
+
+  it("returns null when the line is missing or malformed", () => {
+    expect(parseSessionInfoContext("")).toBeNull();
+    expect(parseSessionInfoContext("**Model:** grok-build")).toBeNull();
+    expect(parseSessionInfoContext("Context: lots / many tokens")).toBeNull();
+  });
+
+  it("rejects non-positive counts (0 is never a real measurement, #39)", () => {
+    expect(parseSessionInfoContext("Context: 0 / 512000 tokens")).toBeNull();
+    expect(parseSessionInfoContext("Context: 100 / 0 tokens")).toBeNull();
   });
 });
 

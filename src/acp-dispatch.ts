@@ -265,16 +265,37 @@ export function extractPromptMeta(result: any): PromptResultMeta {
 }
 
 /**
- * Strip a turn's `totalTokens: 0` report — it is never a real measurement.
- * grok reports 0 both for `/session-info` (context untouched — the 0 would
- * zero the donut) and for `/compact` (context SHRUNK, not emptied — 0 is wrong
- * there too; the "Compacted." bubble is the it-worked signal, and the next turn
- * reports the true post-compact size). `undefined` means "no update": the donut
- * keeps its last real value. Non-zero counts pass through.
+ * Strip a turn's `totalTokens: 0` report — it is never a real measurement
+ * (#39). grok reports 0 both for `/session-info` (context untouched — the 0
+ * zeroed the donut) and for `/compact` (context SHRUNK, not emptied — 0 is
+ * wrong there too; the "Compacted." bubble is the it-worked signal, and the
+ * next turn reports the true post-compact size). `undefined` means "no
+ * update": the donut keeps its last real value. Non-zero counts pass through.
  */
 export function gateZeroTokenMeta(meta: PromptResultMeta): PromptResultMeta {
   if (meta.totalTokens !== 0) return meta;
   return { ...meta, totalTokens: undefined };
+}
+
+/**
+ * Parse the context line out of `/session-info`'s reply text — grok 0.2.x
+ * renders `**Context:** 16017 / 512000 tokens (3%)`. This is the ONLY place
+ * the post-compact size exists before the next inference turn (the compact
+ * turn's meta reports 0, and signals.json keeps the pre-compact count until a
+ * later turn-end flush — research/signals-refresh-probe.cjs), so the host
+ * runs a hidden /session-info right after /compact and feeds this to the
+ * donut. Tolerant of bold markers, casing, and thousands separators; null
+ * when the line is missing or the numbers don't parse (callers fall back
+ * silently — the post-compact re-prime's signals.json read is the backup).
+ */
+export function parseSessionInfoContext(text: string): { used: number; window: number } | null {
+  const m = /context:\*{0,2}\s*([\d][\d,]*)\s*\/\s*([\d][\d,]*)\s*tokens/i.exec(text ?? "");
+  if (!m) return null;
+  const num = (s: string) => Number(s.replace(/,/g, ""));
+  const used = num(m[1]);
+  const window = num(m[2]);
+  if (!Number.isFinite(used) || used <= 0 || !Number.isFinite(window) || window <= 0) return null;
+  return { used, window };
 }
 
 export function makePermissionResponse(id: number | string, optionId: string) {

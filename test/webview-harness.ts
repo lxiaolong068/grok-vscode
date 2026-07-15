@@ -49,6 +49,7 @@ export const BODY = `
     <div id="mode-popover" hidden></div>
     <div id="gear-popover" hidden></div>
     <div id="add-popover" hidden></div>
+    <div id="context-popover" hidden></div>
     <div id="slash-popover" hidden></div>
   </footer>`;
 

@@ -653,6 +653,19 @@ export class AcpClient extends EventEmitter {
         if (id != null) this.respondOk(id, {});
         return;
       }
+      if (
+        method === "_x.ai/session/update" ||
+        method === "x.ai/session/update"
+      ) {
+        // Subagent lifecycle stream (subagent_spawned / subagent_finished) —
+        // carries the duration_ms + child output that Composer's completed
+        // tool_call_update lacks (wire capture:
+        // test/fixtures/composer-subagent-session.jsonl), and doubles as a
+        // completion backstop for the card.
+        this.emit("subagentLifecycle", params?.update);
+        if (id != null) this.respondOk(id, {});
+        return;
+      }
 
       // unknown server request: emit + ack so the agent doesn't hang
       this.emit("serverRequest", msg);

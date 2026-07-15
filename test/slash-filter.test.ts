@@ -83,22 +83,24 @@ describe("applySlashPick", () => {
 });
 
 describe("filterAdvertisedCommands", () => {
-  it("drops /always-approve from the advertised list (#31)", () => {
+  it("drops /always-approve (#31) and /context (#39) from the advertised list", () => {
     const cmds = [
       { name: "compact", description: "Compress conversation" },
       { name: "always-approve", description: "Auto-approve everything" },
       { name: "context", description: "Show context" },
+      { name: "session-info", description: "Show session info" },
     ];
-    expect(filterAdvertisedCommands(cmds).map((c) => c.name)).toEqual(["compact", "context"]);
+    expect(filterAdvertisedCommands(cmds).map((c) => c.name)).toEqual(["compact", "session-info"]);
   });
 
   it("leaves a list without hidden commands untouched", () => {
-    const cmds = [{ name: "compact" }, { name: "context" }];
+    const cmds = [{ name: "compact" }, { name: "session-info" }];
     expect(filterAdvertisedCommands(cmds)).toEqual(cmds);
   });
 
-  it("HIDDEN_SLASH_COMMANDS contains always-approve", () => {
+  it("HIDDEN_SLASH_COMMANDS contains always-approve and context", () => {
     expect(HIDDEN_SLASH_COMMANDS.has("always-approve")).toBe(true);
+    expect(HIDDEN_SLASH_COMMANDS.has("context")).toBe(true);
   });
 
   it("keeps the resulting list out of the dispatch gate too", () => {
