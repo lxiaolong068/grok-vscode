@@ -263,7 +263,7 @@ Or edit the config via gear → *Open global / project config*, then click **+**
 | `grok.includeActiveFileByDefault` | `true` | Auto-add the active editor as a context chip. |
 | `grok.useCtrlEnterToSend` | `false` | When true, Enter inserts a newline and Ctrl/Cmd+Enter sends. |
 | `grok.showThinking` | `false` | Show Grok's reasoning (thinking) traces in chat. Off shows a *Thinking…* stand-in. Also toggleable live from gear → Config & debug. |
-| `grok.telemetry.enabled` | `true` | Send anonymous, privacy-first usage telemetry (see [Privacy](#privacy)). Also honors VS Code's global `telemetry.telemetryLevel`. |
+| `grok.telemetry.enabled` | `true` | Compatibility setting; this fork currently sends no telemetry (see [Privacy](#privacy)). |
 | `grok.chatFontScale` | `100` | Zoom for the chat panel only, as a percent (`150`, `200`, …). Scales the whole chat UI without rescaling the rest of VS Code (unlike `Ctrl/Cmd+Shift+=`). Applies live; supports User (global) and Workspace (local) scope. |
 | `grok.voiceApiKey` | `""` | xAI API key for voice Speech-to-Text — a separate [console.x.ai](https://console.x.ai) developer key, not the CLI login. Empty = fall back to `GROK_VOICE_API_KEY` / `XAI_API_KEY` in the workspace `.env`. |
 | `grok.ffmpegPath` | `""` | Path to `ffmpeg` for microphone recording. Empty = use `ffmpeg` from `PATH`. |
@@ -326,7 +326,7 @@ npm test         # grok-free unit/DOM/integration suite — exactly what CI runs
 npm run package  # → grok-coder-<version>.vsix
 ```
 
-`npm test` is grok-free, so **local ≡ CI** — it never spawns the real binary. A separate, on-demand `npm run test:live` drives the actual `grok` end-to-end (handshake, restore, plan-mode, image/video gen) and is run **before a release**, not on every commit. Full test taxonomy and what's deferred to a future `@vscode/test-electron` suite: **[TESTS.md](TESTS.md)**. Architecture and module map: **[docs/architecture.md](docs/architecture.md)**.
+`npm test` is grok-free, so **local ≡ CI** — it never spawns the real binary. A separate `npm run test:live` drives the actual `grok` end-to-end before release; `npm run test:integration` boots a real VS Code Extension Host without requiring grok. Full test taxonomy: **[TESTS.md](TESTS.md)**. Architecture and module map: **[docs/architecture.md](docs/architecture.md)**.
 
 **Repo conventions:** direct-to-`main`, no feature branches; commits explain the *why*; no speculative abstractions; the grok-free suite is the floor — every change keeps it green.
 
@@ -344,7 +344,7 @@ npm run package  # → grok-coder-<version>.vsix
 
 ## Privacy
 
-**Privacy by design** — no message content, no code, no file paths, and no account/email/login identity ever leave your machine. The only thing sent is an anonymous, opt-out usage count. Turn it off anytime with `grok.telemetry.enabled: false` or VS Code's global `telemetry.telemetryLevel`.
+**Privacy by design** — this fork currently sends no background telemetry. Network data is sent only when you deliberately use Grok/Direct API or voice features; see [docs/privacy.md](docs/privacy.md) for the exact voice credential/audio disclosure.
 
 More: [docs/privacy.md](docs/privacy.md).
 

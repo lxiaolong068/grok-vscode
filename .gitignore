@@ -6,6 +6,7 @@ dist/
 .vscode-test/
 .DS_Store
 .env
+terminals/
 .claude/
 .grok/
 .serena/

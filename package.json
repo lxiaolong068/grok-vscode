@@ -103,6 +103,14 @@
         "title": "%grok.cmd.showLogs%"
       },
       {
+        "command": "grok.expandAllToolDetails",
+        "title": "%grok.cmd.expandAllToolDetails%"
+      },
+      {
+        "command": "grok.collapseAllToolDetails",
+        "title": "%grok.cmd.collapseAllToolDetails%"
+      },
+      {
         "command": "grok.logout",
         "title": "%grok.cmd.logout%"
       },
@@ -207,6 +215,10 @@
         {
           "command": "grokCoder.applyFix",
           "when": "false"
+        },
+        {
+          "command": "grok._debugDummyPlan",
+          "when": "false"
         }
       ],
       "editor/context": [
@@ -292,22 +304,40 @@
             "XHigh — deepest reasoning, slowest"
           ],
           "default": "",
-          "description": "Reasoning effort passed as --reasoning-effort to grok agent stdio. Values match the grok CLI's accepted set (none, minimal, low, medium, high, xhigh). Changing this restarts the session."
+          "description": "Reasoning effort passed as --reasoning-effort to grok agent stdio. Values match the grok CLI's accepted set (none, minimal, low, medium, high, xhigh). Applies live on recent CLIs (grok 0.2.101+); older CLIs, and resetting to the model default, restart the session."
         },
         "grok.useCtrlEnterToSend": {
           "type": "boolean",
           "default": false,
           "description": "Use Ctrl/Cmd+Enter to send (Enter inserts newline)."
         },
+        "grok.terminalShell": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "cmd"
+          ],
+          "enumDescriptions": [
+            "PowerShell on Windows (pwsh, then Windows PowerShell 5.1) — matches the standalone Grok CLI",
+            "Force cmd.exe on Windows (legacy)"
+          ],
+          "default": "auto",
+          "markdownDescription": "Which shell runs the agent's commands **on Windows**. `auto` uses PowerShell (`pwsh.exe`, then Windows PowerShell 5.1); `cmd` forces the legacy `cmd.exe` host. No effect on macOS/Linux, which use `/bin/sh`."
+        },
         "grok.showThinking": {
           "type": "boolean",
           "default": false,
           "markdownDescription": "Show Grok's reasoning (thinking) traces in chat. Off by default — a lightweight \"Thinking…\" indicator stands in while Grok reasons. Also toggleable live from the gear menu → **Config & debug → Show thinking traces** (applies to already-loaded sessions too)."
         },
+        "grok.expandCommandOutputs": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Expand tool details by default, including shell command IN/OUT blocks and edit inline diffs. Also toggleable live from gear → **Config & debug → Expand tool details**."
+        },
         "grok.telemetry.enabled": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Send anonymous, privacy-first usage telemetry. A single `session_start` event per session carries only an anonymous install id (a random GUID, no account/identity) plus the chosen mode/model/effort — **never** any message content, code, or file paths. Also requires VS Code's global `telemetry.telemetryLevel` to be enabled; turning either off stops all sending."
+          "markdownDescription": "Compatibility setting reserved for possible future anonymous telemetry. This fork currently sends no telemetry; changing this setting has no network effect."
         },
         "grok.chatFontScale": {
           "type": "number",
@@ -319,7 +349,7 @@
         "grok.voiceApiKey": {
           "type": "string",
           "default": "",
-          "markdownDescription": "xAI API key for voice control (Speech-to-Text via `api.x.ai/v1/stt`). This is a **separate** developer key from [console.x.ai](https://console.x.ai) — it is billed pay-as-you-go and is unrelated to the Grok CLI login. Leave empty to fall back to `GROK_VOICE_API_KEY` or `XAI_API_KEY` in your workspace `.env`."
+          "markdownDescription": "Optional override key for voice Speech-to-Text (`api.x.ai/v1/stt`). Leave empty to reuse your `grok login` token automatically. Set this, `GROK_VOICE_API_KEY`, or `XAI_API_KEY` only to use a dedicated developer key. See [voice setup](https://github.com/lxiaolong068/grok-vscode/blob/main/docs/voice-setup.md)."
         },
         "grok.ffmpegPath": {
           "type": "string",

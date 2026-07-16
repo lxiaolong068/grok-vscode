@@ -1,4 +1,5 @@
-import { ChildProcess, execFile, spawn } from "node:child_process";
+import { ChildProcess, execFile, execFileSync, spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 import * as os from "node:os";
 
@@ -64,11 +65,129 @@ export function buildKillPlan(pid: number, platform: NodeJS.Platform = process.p
 }
 
 /**
+ * Resolve a name to its first real PATH hit via Windows `where`, or undefined
+ * when it isn't found. Thin impure wrapper so `resolveTerminalShell` stays pure
+ * and unit-testable. `where` exits non-zero (throws) when nothing matches; the
+ * piped stderr never reaches the console.
+ *
+ * Skips the Microsoft Store execution-alias stub (a 0-byte reparse point under
+ * `…\WindowsApps\`): `existsSync` reports it present, but when the Store app
+ * isn't installed it just prints an "install from Store" prompt and exits — the
+ * same trap that bites `python.exe`. Take the first *non-stub* hit instead.
+ */
+function whichOnPath(name: string): string | undefined {
+  try {
+    // stderr → ignore so `where`'s "Could not find files" line on a miss never
+    // reaches the extension's logs; stdout is still returned for a hit.
+    const out = execFileSync("where", [name], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    for (const line of out.split(/\r?\n/)) {
+      const p = line.trim();
+      if (!p || /[\\/]WindowsApps[\\/]/i.test(p)) continue;
+      if (existsSync(p)) return p;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** How to pick the Windows host shell — `grok.terminalShell` (#46). */
+export type ShellPreference = "auto" | "cmd";
+
+/**
+ * Choose the shell for the agent's `terminal/*` commands (spawn's `shell`
+ * option). On Windows, mirror the standalone grok CLI by running under
+ * PowerShell — PowerShell 7 (`pwsh.exe`) when installed, else Windows
+ * PowerShell 5.1 (`powershell.exe`), else cmd.exe (Node's `shell: true`
+ * default). On POSIX, `/bin/sh` (Node's `shell: true`). See issue #46.
+ *
+ * The extension is the one running commands — grok delegates every one over ACP
+ * `terminal/create` — so the host shell is *our* choice, not a CLI flag. Under
+ * cmd.exe the agent couldn't reach the user's PowerShell profile functions or
+ * run pipelines, so it had to re-wrap each command; matching PowerShell (as the
+ * standalone CLI already does) removes that friction.
+ *
+ * Node runs a string shell as `<shell> -c "<command>"`, and both pwsh and
+ * Windows PowerShell accept `-c` as the `-Command` alias, so the agent's
+ * command string runs with PowerShell semantics. We deliberately don't force
+ * `-NoProfile`: profile-defined functions/modules are exactly what users expect
+ * commands to reach (and what standalone grok reaches).
+ *
+ * `pref = "cmd"` is the escape hatch (`grok.terminalShell`): force cmd.exe on
+ * Windows (a no-op on POSIX, where it's `/bin/sh` either way) for anyone the
+ * PowerShell default bites — e.g. the `powershell.exe` 5.1 fallback rejects
+ * `&&` chains and collapses non-zero native exits to 1 (pwsh 7 does neither).
+ * Pure given `resolve`.
+ */
+export function resolveTerminalShell(
+  platform: NodeJS.Platform,
+  resolve: (name: string) => string | undefined,
+  pref: ShellPreference = "auto",
+): string | true {
+  if (pref === "cmd") return true; // cmd.exe on Windows / /bin/sh on POSIX
+  if (platform !== "win32") return true;
+  return resolve("pwsh") ?? resolve("powershell") ?? true;
+}
+
+/**
+ * The `GROK_SHELL` value that tells the agent which shell dialect to WRITE for,
+ * derived from the shell we'll actually RUN its commands under
+ * (`resolveTerminalShell`). In ACP mode grok emits the raw command to the
+ * client's shell but describes the shell from its own host detection, so the two
+ * can diverge (e.g. the model writes POSIX `(cd x; y)` for a PowerShell host, or
+ * PowerShell syntax when we fall back to cmd) — setting `GROK_SHELL` in grok's
+ * spawn env realigns the model's dialect hints with our shell (§2.9;
+ * research/oss-surfaces-probe.cjs confirms it drives the first-message `Shell:`).
+ * Pure. POSIX returns `undefined` — grok's own host detection is correct there,
+ * so we don't override it. Windows maps the resolved shell to grok's accepted
+ * override values (`pwsh` / `powershell` / `cmd`).
+ */
+export function grokShellEnvValue(
+  resolved: string | true,
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
+  if (platform !== "win32") return undefined;
+  if (resolved === true) return "cmd"; // cmd.exe: forced pref, or no PowerShell found
+  const base = resolved.toLowerCase();
+  if (base.includes("pwsh")) return "pwsh";
+  if (base.includes("powershell")) return "powershell";
+  return undefined; // unknown resolution — let grok's host detection decide
+}
+
+/** The resolved terminal shell (cached), for callers that need to align other
+ *  subsystems (e.g. the agent's `GROK_SHELL`) with what we run commands under. */
+export function resolvedTerminalShell(): string | true {
+  return terminalShell();
+}
+
+// Shell resolution runs a `where` subprocess, so cache it for the process
+// lifetime instead of paying that cost on every `terminal/create`.
+let shellPreference: ShellPreference = "auto";
+let cachedTerminalShell: string | true | undefined;
+
+/**
+ * Apply the `grok.terminalShell` preference (host reads config → calls this on
+ * startup + on change). Clears the cache so the next command re-resolves.
+ */
+export function setTerminalShellPreference(pref: ShellPreference): void {
+  if (pref !== shellPreference) {
+    shellPreference = pref;
+    cachedTerminalShell = undefined;
+  }
+}
+
+function terminalShell(): string | true {
+  if (cachedTerminalShell === undefined) {
+    cachedTerminalShell = resolveTerminalShell(process.platform, whichOnPath, shellPreference);
+  }
+  return cachedTerminalShell;
+}
+
+/**
  * Manages background processes spawned on behalf of the agent's `terminal/*`
- * ACP requests. Each terminal is a headless shell child process (cmd.exe on
- * Windows, /bin/sh elsewhere — picked by Node when `shell: true`) whose
- * stdout+stderr is captured into a single rolling buffer respecting
- * `outputByteLimit`.
+ * ACP requests. Each terminal is a headless shell child process (PowerShell on
+ * Windows, /bin/sh elsewhere — see `resolveTerminalShell`) whose stdout+stderr
+ * is captured into a single rolling buffer respecting `outputByteLimit`.
  */
 export class TerminalManager {
   private terminals = new Map<string, TerminalEntry>();
@@ -78,7 +197,7 @@ export class TerminalManager {
     const env = this.envFromParams(params.env);
     const cwd = params.cwd || process.cwd();
     const byteLimit = params.outputByteLimit ?? DEFAULT_BYTE_LIMIT;
-    const proc = spawn(params.command, { cwd, env, shell: true });
+    const proc = spawn(params.command, { cwd, env, shell: terminalShell() });
 
     const entry: TerminalEntry = {
       proc,

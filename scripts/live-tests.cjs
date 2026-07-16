@@ -52,7 +52,7 @@ try {
   console.error("Could not load compiled modules — run `npm run compile` (or `tsc -p .`) first.\n" + e.message);
   process.exit(2);
 }
-const { isMediaGenToolCall, extractGeneratedMediaPaths } = dispatch;
+const { isMediaGenToolCall, extractGeneratedMediaPaths, contextUsedFromCompactNotification, resolveModelId } = dispatch;
 const { shouldBlockWrite } = planGate;
 const { GROK_PRIMER } = primer;
 const { isSubagentToolCall, subagentLabel } = helpers;
@@ -107,6 +107,8 @@ class Acp {
     this.subagentCalls = []; // tool calls the real isSubagentToolCall matched (genuine spawn_subagent shape)
     this.bgTasks = [];       // background tasks grok spawned (its real subagent mechanism)
     this.taskOutputCalls = []; // get_command_or_subagent_output poller tool_calls
+    this.lifecycle = [];     // subagent_spawned/subagent_finished (method _x.ai/session/update)
+    this.xaiNotifs = [];     // LIVE rail: _x.ai/session_notification updates (auto_compact_completed, subagent_*, turn_completed, …) — the method the extension consumes
     this.onWrite = onWrite;  // optional per-test hook (path) => "write" | "ack"
     this.buf = "";
     const win = process.platform === "win32";
@@ -143,6 +145,23 @@ class Acp {
     if (m.method === "session/update") {
       const u = m.params && m.params.update;
       if (u) { this.updates.push(u); this._inspectUpdate(u); }
+      return;
+    }
+    if (m.method === "_x.ai/session/update" || m.method === "x.ai/session/update") {
+      // Persist/replay rail — recorded for the subagent tests' historical check.
+      const u = m.params && m.params.update;
+      if (u) this.lifecycle.push(u);
+      if (m.id != null) this._respond(m.id, {});
+      return;
+    }
+    if (m.method === "_x.ai/session_notification" || m.method === "x.ai/session_notification") {
+      // LIVE lifecycle rail — the method the extension's AcpClient handles
+      // (acp.ts → xaiNotification). Carries auto_compact_completed / subagent_* /
+      // turn_completed. Record so the notification-consumer features have a real
+      // release gate against CLI drift.
+      const u = m.params && m.params.update;
+      if (u) this.xaiNotifs.push(u);
+      if (m.id != null) this._respond(m.id, {});
       return;
     }
     if (m.method && m.id != null) this._serverRequest(m);  // server→client request
@@ -239,6 +258,71 @@ function assert(cond, msg) { if (!cond) throw new Error(msg); }
 // ── tests ────────────────────────────────────────────────────────────────────
 // Each returns a short detail string on success, throws Error to FAIL, or
 // throws Skip to mark inconclusive (e.g. no subscription / grok didn't delegate).
+
+// #46: agent shell host. The extension — not grok — runs every terminal/* call,
+// so which shell it uses is our choice. This is the one entry that doesn't spawn
+// grok: it drives the REAL compiled `out/terminal-manager.js` the extension ships
+// against the actual OS shell, proving on Windows that a grok-issued command runs
+// under PowerShell (pwsh → powershell), where a PowerShell-only pipeline + cmdlet
+// succeed that cmd.exe would have failed. On POSIX it just confirms /bin/sh is
+// unchanged. Deterministic (we issue the commands), so it's a real release gate.
+async function testTerminalShell() {
+  let TerminalManager, resolveTerminalShell;
+  try {
+    ({ TerminalManager, resolveTerminalShell } = require(path.join(REPO, "out", "terminal-manager.js")));
+  } catch (e) {
+    throw new Skip("out/terminal-manager.js not built — run `npm run compile` (" + e.message + ")");
+  }
+  const which = (name) => {
+    if (process.platform !== "win32") return undefined;
+    try {
+      const out = require("node:child_process").execFileSync("where", [name], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      const first = out.split(/\r?\n/)[0]?.trim();
+      return first && fs.existsSync(first) ? first : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const shell = resolveTerminalShell(process.platform, which);
+
+  const m = new TerminalManager();
+  const run = async (command) => {
+    const { terminalId } = m.create({ command });
+    const { exitCode } = await m.waitForExit(terminalId);
+    const output = m.output(terminalId).output.trim();
+    return { exitCode, output };
+  };
+
+  try {
+    if (process.platform !== "win32") {
+      assert(shell === true, `POSIX host should be /bin/sh (true), got ${JSON.stringify(shell)}`);
+      const r = await run("printf '%s' OK_POSIX");
+      assert(r.exitCode === 0 && /OK_POSIX/.test(r.output), `sh command failed: ${JSON.stringify(r)}`);
+      return "POSIX host = /bin/sh (unchanged); sh command ran";
+    }
+
+    // Windows: must resolve to a PowerShell, never cmd.exe.
+    assert(shell !== true, "Windows resolved to cmd.exe (shell:true) — no PowerShell on PATH?");
+    const shellName = path.basename(String(shell)).toLowerCase();
+    assert(/^(pwsh|powershell)\.exe$/.test(shellName), `unexpected Windows host shell: ${shell}`);
+
+    const pipe = await run("'a','b','c' | Measure-Object | ForEach-Object { $_.Count }");
+    assert(pipe.exitCode === 0 && pipe.output.includes("3"), `PS pipeline failed under ${shellName}: ${JSON.stringify(pipe)}`);
+
+    const ver = await run("$PSVersionTable.PSVersion.Major");
+    assert(ver.exitCode === 0 && /^\d+$/.test(ver.output), `$PSVersionTable failed: ${JSON.stringify(ver)}`);
+
+    const fmt = await run("[pscustomobject]@{ RepoRoot = 'demo' } | Format-List");
+    assert(fmt.exitCode === 0 && /RepoRoot/.test(fmt.output) && /demo/.test(fmt.output), `Format-List pipe failed: ${JSON.stringify(fmt)}`);
+
+    return `Windows host = ${shellName} (PowerShell ${ver.output}); pipeline + cmdlet + Format-List all ran (cmd.exe would fail these)`;
+  } finally {
+    m.disposeAll();
+  }
+}
 
 async function testHandshake() {
   const cwd = mkTmp("hs");
@@ -579,10 +663,12 @@ async function testPlanMode() {
 
     // ── Phase 1: PLAN (gate up) ──────────────────────────────────────────────
     // grok ≥0.2.91's plan flow is long even when healthy (~4 min: reads its docs,
-    // keeps session-dir state, may delegate to a planning subagent), so give it 6 min.
+    // keeps session-dir state, may delegate to a planning subagent) — real PASSes
+    // have clocked 305-315s, and a slow-backend night tips a 6-min ceiling into a
+    // false FAIL. 10 min keeps the timeout a hang detector, not a latency bet.
     await withTimeout(
       acp.send("session/prompt", { sessionId, prompt: [{ type: "text", text: "Plan how to add a subtract(a,b) function to app.js and a test for it. Produce a detailed plan; do not implement yet." }] }),
-      360000, "plan prompt");
+      600000, "plan prompt");
 
     const upCtx = { active: true, workspaceRoot: cwd, grokHome: GROK_HOME };
     assert(shouldBlockWrite(appPath, upCtx) === true, "plan-gate failed to block an in-workspace write while up");
@@ -724,10 +810,167 @@ async function testSubagent() {
     }
     if (acp.subagentCalls.length > 0) {
       const labels = [...new Set(acp.subagentCalls.map(subagentLabel))];
-      return `genuine spawn_subagent card(s): ${labels.join(", ")}; poller correctly not carded`;
+      // Hard gate: a genuine spawn_subagent delegation must surface its lifecycle
+      // on the LIVE rail — the extension fills the card's duration/output from it
+      // (v1.6.1). A brief wait covers transport-tail timing after the turn ends.
+      await waitFor(() => acp.xaiNotifs.some((u) => u.sessionUpdate === "subagent_finished"),
+        15000, "live subagent_finished after a genuine spawn_subagent delegation");
+      const spawned = acp.xaiNotifs.filter((u) => u.sessionUpdate === "subagent_spawned");
+      const finished = acp.xaiNotifs.filter((u) => u.sessionUpdate === "subagent_finished");
+      assert(spawned.length > 0, "spawn_subagent delegated but NO live subagent_spawned arrived (wire drift)");
+      const matched = finished.find((f) => spawned.some((s) => s.subagent_id === f.subagent_id));
+      assert(matched, "no subagent_finished matched a subagent_spawned by subagent_id");
+      assert(typeof matched.duration_ms === "number" && matched.duration_ms >= 0,
+        "subagent_finished.duration_ms not a finite non-negative number: " + JSON.stringify(matched.duration_ms));
+      return `genuine spawn_subagent card(s): ${labels.join(", ")}; poller not carded; ` +
+        `live lifecycle spawned=${spawned.length} finished=${finished.length} duration_ms=${matched.duration_ms}`;
     }
     return `delegated via background task (${bgIds.size} bg spawn, ${pollIds.size} output-poll); ` +
       `poller correctly NOT carded — grok's real subagent = background shell, see research/subagents.md`;
+  } finally { acp.kill(); }
+}
+
+// Composer-agent variant: the Composer wire differs from grok-build's in every
+// subagent-relevant way — the delegation tool is named "Task" (not
+// spawn_subagent), its completion is an UNTITLED tool_call_update with
+// rawOutput {type:"Text"} and NO duration, and the duration/output ride the
+// subagent_spawned/subagent_finished lifecycle events instead (wire capture:
+// test/fixtures/composer-subagent-session.jsonl). Pin both shapes so agent-side
+// drift fails the gate, not the user's chat. Selects the first *composer* model
+// right after session/new — the agent is rebindable until the first turn.
+async function testSubagentComposer() {
+  const cwd = mkTmp("subc");
+  fs.writeFileSync(path.join(cwd, "app.js"), "const {add}=require('./math');\nconsole.log(add(2,3));\n");
+  fs.writeFileSync(path.join(cwd, "math.js"), "function add(a,b){return a+b}\nmodule.exports={add};\n");
+  const acp = new Acp(cwd, { extraArgs: ["--always-approve"] });
+  try {
+    await withTimeout(acp.send("initialize", INIT), 30000, "init");
+    const ns = await withTimeout(acp.send("session/new", { cwd, mcpServers: [] }), 30000, "new");
+    assert(ns.result && ns.result.sessionId, "session/new failed");
+    const models = (ns.result.models && ns.result.models.availableModels) || [];
+    const composer = models.find((m) => /composer/i.test(String(m.modelId || "")));
+    if (!composer) throw new Skip("no Composer model available on this account/build");
+    const sm = await withTimeout(
+      acp.send("session/set_model", { sessionId: ns.result.sessionId, modelId: composer.modelId }),
+      30000, "set_model");
+    if (sm.error) throw new Skip(`set_model(${composer.modelId}) rejected: ${JSON.stringify(sm.error).slice(0, 120)}`);
+    await withTimeout(
+      acp.send("session/prompt", { sessionId: ns.result.sessionId, prompt: [{ type: "text", text: "Use a subagent to read math.js and report in one sentence what add() does. Delegate to a subagent." }] }),
+      300000, "composer subagent prompt");
+
+    const misfired = acp.taskOutputCalls.filter((u) => isSubagentToolCall(u));
+    assert(misfired.length === 0, `isSubagentToolCall wrongly matched ${misfired.length} poller(s)`);
+    if (acp.subagentCalls.length === 0 && acp.bgTasks.length === 0) {
+      throw new Skip("composer did not delegate this run (non-deterministic)");
+    }
+    // Composer's completion is an UNTITLED tool_call_update (status completed,
+    // no _meta) on the SAME toolCallId as the Task call — the shape the card
+    // relies on. Its absence after a real delegation is wire drift.
+    const subIds = new Set(acp.subagentCalls.map((u) => u.toolCallId));
+    const completed = acp.updates.filter((u) =>
+      u.sessionUpdate === "tool_call_update" &&
+      subIds.has(u.toolCallId) &&
+      String(u.status || "").toLowerCase() === "completed");
+    assert(completed.length > 0, "Task delegation never completed on the tool channel — the card would spin forever (wire drift)");
+    // Composer's tool-channel completion carries NO duration — the extension
+    // fills it from subagent_finished on the LIVE rail (v1.6.1). Since a Task
+    // delegation demonstrably ran (tool completion above), hard-gate the live
+    // lifecycle: without it, Composer cards lose their duration/output entirely.
+    await waitFor(() => acp.xaiNotifs.some((u) => u.sessionUpdate === "subagent_finished"),
+      15000, "live subagent_finished after a Composer Task delegation");
+    const liveSpawned = acp.xaiNotifs.filter((u) => u.sessionUpdate === "subagent_spawned");
+    const liveFinished = acp.xaiNotifs.filter((u) => u.sessionUpdate === "subagent_finished");
+    assert(liveSpawned.length > 0, "Composer delegated but NO live subagent_spawned arrived (wire drift)");
+    const matched = liveFinished.find((f) => liveSpawned.some((s) => s.subagent_id === f.subagent_id));
+    assert(matched, "no Composer subagent_finished matched a subagent_spawned by subagent_id");
+    assert(typeof matched.duration_ms === "number" && matched.duration_ms >= 0,
+      "Composer subagent_finished.duration_ms not finite/non-negative: " + JSON.stringify(matched.duration_ms));
+    const labels = [...new Set(acp.subagentCalls.map(subagentLabel))];
+    return `composer(${composer.modelId}) delegated: ${labels.join(", ") || "(bg)"}; ` +
+      `${completed.length} tool-channel completion(s); live lifecycle spawned=${liveSpawned.length} finished=${liveFinished.length} duration_ms=${matched.duration_ms}`;
+  } finally { acp.kill(); }
+}
+
+// The context donut's post-/compact refresh (v1.6.1) rides the LIVE
+// _x.ai/session_notification rail: auto_compact_completed.tokens_after. This is
+// the drift canary — if a CLI stops emitting it, the donut silently falls back
+// to the slower /session-info scrape (and, on a build lacking that too, wouldn't
+// refresh at all). Feed the real payload through the SAME
+// contextUsedFromCompactNotification the host uses. A native /compact emits
+// auto_compact_completed (never _started), so this also pins the method name.
+async function testCompactNotification() {
+  const cwd = mkTmp("compact");
+  const acp = new Acp(cwd);
+  try {
+    let r = await withTimeout(acp.send("initialize", INIT), 30000, "init");
+    assert(!r.error, "init errored");
+    r = await withTimeout(acp.send("session/new", { cwd, mcpServers: [] }), 30000, "session/new");
+    assert(r.result && r.result.sessionId, "session/new failed: " + JSON.stringify(r.error));
+    const sessionId = r.result.sessionId;
+    // A little history so /compact has something to compress.
+    const s1 = await withTimeout(acp.send("session/prompt", { sessionId, prompt: [{ type: "text", text: "In one short sentence, say hello." }] }), 120000, "seed1");
+    assert(!s1.error, "seed1 prompt errored: " + JSON.stringify(s1.error));
+    const s2 = await withTimeout(acp.send("session/prompt", { sessionId, prompt: [{ type: "text", text: "Name one primary color. One word only." }] }), 120000, "seed2");
+    assert(!s2.error, "seed2 prompt errored: " + JSON.stringify(s2.error));
+    const before = acp.xaiNotifs.length;
+    const cr = await withTimeout(acp.send("session/prompt", { sessionId, prompt: [{ type: "text", text: "/compact" }] }), 120000, "/compact");
+    assert(!cr.error, "/compact errored: " + JSON.stringify(cr.error));
+    const fresh = acp.xaiNotifs.slice(before);
+    const completed = fresh.find((u) => u.sessionUpdate === "auto_compact_completed");
+    assert(completed, "no auto_compact_completed on _x.ai/session_notification after /compact — the v1.6.1 donut refresh would silently regress");
+    const used = contextUsedFromCompactNotification(completed);
+    assert(typeof used === "number" && used > 0,
+      "auto_compact_completed.tokens_after is not a positive number: " + JSON.stringify(completed));
+    // A MANUAL /compact must NOT emit auto_compact_started — that's the auto-only
+    // signal the "Auto-compacting…" note keys on. Live-pin the distinction.
+    const started = fresh.find((u) => u.sessionUpdate === "auto_compact_started");
+    assert(!started, "manual /compact unexpectedly emitted auto_compact_started — the auto-compact note would misfire on manual compaction");
+    return `auto_compact_completed.tokens_after=${used}, no auto_compact_started (auto/manual distinction confirmed)`;
+  } finally { acp.kill(); }
+}
+
+// Live reasoning-effort switch (v1.6.1): the model advertises
+// supportsReasoningEffort and set_model accepts an _meta.reasoningEffort override
+// with no process restart. This is a REAL application gate, not just acceptance:
+// after set_model we hard-wait for a `model_changed` notification whose
+// `reasoning_effort` equals the target — the EFFECTIVE effort the CLI applied
+// (broadcast post-resolution, model_switch.rs). A build that accepts the request
+// but ignores the override (the silent-no-op) fails here instead of lying green.
+async function testEffortLive() {
+  const cwd = mkTmp("effort");
+  const acp = new Acp(cwd);
+  try {
+    let r = await withTimeout(acp.send("initialize", INIT), 30000, "init");
+    assert(!r.error, "init errored");
+    r = await withTimeout(acp.send("session/new", { cwd, mcpServers: [] }), 30000, "session/new");
+    assert(r.result && r.result.sessionId, "session/new failed: " + JSON.stringify(r.error));
+    const sessionId = r.result.sessionId;
+    const models = (r.result.models && r.result.models.availableModels) || [];
+    const currentId = r.result.models && r.result.models.currentModelId;
+    // Resolve the current model via the REAL resolver (grok can echo a versioned
+    // id not in the list); do NOT blindly fall back to models[0].
+    const resolvedId = resolveModelId(currentId, models);
+    const cur = models.find((m) => m.modelId === resolvedId) || models.find((m) => m.modelId === currentId);
+    if (!cur || !(cur._meta && cur._meta.supportsReasoningEffort)) {
+      throw new Skip("current model does not advertise supportsReasoningEffort — live effort N/A on this build/model");
+    }
+    const advertised = cur._meta.reasoningEffort;
+    // Pick a target the model actually offers (from reasoningEfforts) that differs
+    // from the advertised one — hardcoding low/high could pick an unoffered value.
+    const offered = ((cur._meta.reasoningEfforts || []).map((e) => e && e.value).filter(Boolean));
+    const target = offered.find((e) => e !== advertised) || (advertised === "low" ? "high" : "low");
+    const before = acp.xaiNotifs.length;
+    const sr = await withTimeout(
+      acp.send("session/set_model", { sessionId, modelId: cur.modelId, _meta: { reasoningEffort: target } }),
+      30000, "set_model effort");
+    assert(!sr.error, "set_model with _meta.reasoningEffort errored: " + JSON.stringify(sr.error));
+    assert(sr.result && sr.result._meta && sr.result._meta.model && sr.result._meta.model.Ok,
+      "set_model did not return _meta.model.Ok: " + JSON.stringify(sr.result));
+    // The authoritative ack: model_changed with the EFFECTIVE effort == target.
+    await waitFor(
+      () => acp.xaiNotifs.slice(before).some((u) => u.sessionUpdate === "model_changed" && u.reasoning_effort === target),
+      10000, `model_changed with reasoning_effort=${target} (proves the override was APPLIED, not just accepted)`);
+    return `advertised=${advertised}, offered=[${offered.join(",")}]; applied reasoningEffort→${target} live, confirmed via model_changed`;
   } finally { acp.kill(); }
 }
 
@@ -735,12 +978,17 @@ async function testSubagent() {
 const TESTS = [
   { name: "handshake", fn: testHandshake, slow: false, smoke: true },
   { name: "capabilities", fn: testCapabilities, slow: false, smoke: true },
+  // #46 — local (non-grok) validation of the shipped TerminalManager's shell host.
+  { name: "terminal-shell", fn: testTerminalShell, slow: false, smoke: true },
   { name: "prompt-roundtrip", fn: testPrompt, slow: false },
   { name: "cancel-mid-turn", fn: testCancelMidTurn, slow: false },
   { name: "parallel-sessions", fn: testParallelSessions, slow: false },
   { name: "vision-prompt", fn: testVisionPrompt, slow: false },
   { name: "session-restore", fn: testRestore, slow: false },
   { name: "edit-diff-restore", fn: testEditDiffRestore, slow: false },
+  // v1.6.1 notification-rail features (drift canaries):
+  { name: "compact-notification", fn: testCompactNotification, slow: false },
+  { name: "effort-live", fn: testEffortLive, slow: false, smoke: true },
   // Now the full loop (primer -> plan -> reject -> approve, ~4 grok turns), so it's
   // slow enough to skip under --quick; the full release gate still runs it.
   { name: "plan-mode", fn: testPlanMode, slow: true },
@@ -751,6 +999,7 @@ const TESTS = [
   // interactively. See the testVideo comment + the SKIP-on-timeout handling.
   { name: "video-gen", fn: testVideo, slow: true, optIn: true },
   { name: "subagent", fn: testSubagent, slow: true },
+  { name: "subagent-composer", fn: testSubagentComposer, slow: true },
 ];
 
 function selected() {

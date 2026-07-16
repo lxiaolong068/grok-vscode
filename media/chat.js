@@ -198,6 +198,21 @@
     // & debug. The host posts the real value on init and on config change.
     showThinking: false,
     thinkingIndicatorEl: null,
+    // Command rows awaiting their output ({command, details, done}) — the
+    // host's commandOutput (snapshotted at terminal/release, #41) attaches to
+    // the oldest un-served row with the exact same command string (FIFO).
+    pendingCommandDetails: [],
+    // grok.expandCommandOutputs (persisted, global): the standing DEFAULT for
+    // new content — command IN/OUT details pre-open, and command-bearing groups
+    // auto-open. Command scope only (explore/edit groups stay collapsed).
+    expandCommandOutputs: false,
+    // toolExpandOverride (per-session, in-memory): the Command Palette
+    // Expand/Collapse All latch. null = follow the setting above; true/false =
+    // force ALL groups + details open/closed for this session, and keep applying
+    // to new content as it streams in (last action wins vs the setting). Rides
+    // the session's replay buffer, so it survives focus-swaps but resets on a
+    // cold reopen from history — see resetForNewSession + the emit in sidebar.ts.
+    toolExpandOverride: null,
   };
 
   // Matches any version of the extension's primer (v1, v2, …). Used during
@@ -329,7 +344,7 @@
 
   // ---------- markdown ----------
 
-  const { looksLikeFileRef, formatRelativeTime, modelDisplayName, nextMicState, trailingSendPhrase, buildQuestionAnswers, isSubagentToolCall, subagentLabel, cleanSubagentOutput, shouldStickToBottom, splitMath, stripUnsupportedTex, toolFailureText, parseAttachmentContext, parseSelectionBlocks, parseImageTags, isKnownHostMessage } = globalThis.GrokWebviewHelpers;
+  const { looksLikeFileRef, formatRelativeTime, modelDisplayName, nextMicState, trailingSendPhrase, buildQuestionAnswers, isSubagentToolCall, subagentLabel, cleanSubagentOutput, parseSubagentTaskResult, shouldStickToBottom, splitMath, stripUnsupportedTex, toolFailureText, commandProgramLabel, extractToolResultOutput, computeLineDiff, parseAttachmentContext, parseSelectionBlocks, parseImageTags, isKnownHostMessage } = globalThis.GrokWebviewHelpers;
 
   function escapeAttr(s) {
     return String(s == null ? "" : s)
@@ -916,6 +931,20 @@
       .replace(/\x00M(\d+)\x00/g, (_, i) => mathHtml[+i]);
   }
 
+  // RTL content support, half one: dir="auto" on every block element
+  // renderMarkdown emits, so each takes its direction from its own first
+  // strong character — an Arabic list right-aligns with markers on the right
+  // while an English block in the same message stays LTR. Loose paragraph
+  // text can't be covered here (renderMarkdown emits it bare with <br>
+  // breaks, not <p>) — that half is `unicode-bidi: plaintext` on the
+  // containers in chat.css. Code deliberately never gets dir=auto: chat.css
+  // pins pre/code LTR. Runs after every innerHTML = renderMarkdown(...).
+  function applyAutoDir(root) {
+    for (const el of root.querySelectorAll("ul, ol, li, h1, h2, h3, td, th")) {
+      el.setAttribute("dir", "auto");
+    }
+  }
+
   // ---------- popovers ----------
 
   function closePopovers() {
@@ -1188,6 +1217,22 @@
         applyThinkingVisibility();
         vscode.postMessage({ type: "setShowThinking", value: state.showThinking });
         renderConfigDebugPanel(); // re-render so the switch reflects the new state
+      },
+    );
+    // Expand tool details (#41/#45) — the persisted default: pre-open every tool
+    // detail surface (a command's IN/OUT block, an edit's inline diff) + the
+    // groups that hold one. Named to match the "Expand/Collapse All Tool Details"
+    // commands. Flipping it clears the per-session Expand/Collapse All latch so the
+    // setting takes over (last action wins). Persisted via grok.expandCommandOutputs
+    // (the key is unchanged — only the user-facing label widened).
+    addGearItem(
+      `<span>Expand tool details</span><span class="popover-switch${state.expandCommandOutputs ? " on" : ""}" role="switch" aria-checked="${state.expandCommandOutputs}"><span class="popover-switch-knob"></span></span>`,
+      () => {
+        state.expandCommandOutputs = !state.expandCommandOutputs;
+        state.toolExpandOverride = null;
+        applyExpandCommandOutputs();
+        vscode.postMessage({ type: "setExpandCommandOutputs", value: state.expandCommandOutputs });
+        renderConfigDebugPanel();
       },
     );
     addGearSep();
@@ -1566,6 +1611,8 @@
     state.toolItemsByToolCallId.clear();
     state.toolFailuresById.clear();
     state.subagentCards.clear();
+    state.pendingCommandDetails = [];
+    state.toolExpandOverride = null; // the Expand/Collapse All latch is per-session; a swap/restore starts clean (the replay buffer re-applies it for a warm re-focus)
     state.turnAgentActionsEl = null;
     state.activeAgentEl = null;
     state.activeAgentRaw = "";
@@ -1710,7 +1757,7 @@
 
     const body = document.createElement("div");
     body.className = "body";
-    if (text) { body.innerHTML = renderMarkdown(text); renderMermaidIn(body); }
+    if (text) { body.innerHTML = renderMarkdown(text); applyAutoDir(body); renderMermaidIn(body); }
     contentParent.appendChild(body);
 
     if (role === "user" && chips && chips.length > 0) {
@@ -1870,7 +1917,16 @@
   }
   function summarizeTools(calls) {
     const n = { explore: 0, edit: 0, delete: 0, generate: 0, web: 0, command: 0 };
-    for (const c of calls) n[categorize(c)]++;
+    // Edits are counted by UNIQUE file path (grok emits one edit call per change,
+    // so two edits to one file must read "Edited 1 file", not 2). Pathless edits
+    // stay distinct via a synthetic key.
+    const editFiles = new Set();
+    for (const c of calls) {
+      const cat = categorize(c);
+      if (cat === "edit") editFiles.add(toolFilePath(c) || "__anon" + editFiles.size);
+      else n[cat]++;
+    }
+    n.edit = editFiles.size;
     const parts = [];
     if (n.explore) parts.push(`explored ${n.explore} item${n.explore === 1 ? "" : "s"}`);
     if (n.edit) parts.push(`edited ${n.edit} file${n.edit === 1 ? "" : "s"}`);
@@ -1915,6 +1971,9 @@
     const command = r.command || r.cmd;
     const pattern = r.glob_pattern || r.pattern || r.query || r.regex || r.search;
     const url = r.url || r.uri;
+    // Deliberate short trim (40 chars): collapsed rows read as a scannable
+    // summary, not a wall of shell — the full command lives one click away in
+    // the IN/OUT detail. (CSS still single-line-ellipsizes whatever remains.)
     const clamp = (s) => (s && s.length > 40 ? s.slice(0, 40) + "…" : s);
     // A search tool's *pattern* is the useful target — prefer it over the path it
     // searched (grep ships both `pattern` and `path:"."`, which would otherwise
@@ -1940,7 +1999,9 @@
         target = prettyPath(filePath);
       }
     } else if (command) {
-      target = clamp(command);
+      // Program name (+ a non-flag subcommand), not the raw command — the full
+      // text is in the row's IN/OUT detail. "Run git status", "Run node", etc.
+      target = commandProgramLabel(command);
     } else if (pattern) {
       target = clamp(pattern);
     }
@@ -1988,15 +2049,13 @@
     const el = state.activeToolGroupEl;
     const calls = el._calls || [];
 
-    // A lone edit/write is NOT flattened to a `.tool-flat` (icon + label only). That
-    // flat row has no chevron and no body, so the diff preview ("N → M lines" +
-    // "open diff →") — which attachDiffPreviewToToolItem appends to the tool-item in
-    // the body — would be discarded and the message couldn't be expanded to review
-    // the change (#30). On restore it's worse: renderRestoredPermissionForTool closes
-    // the group BEFORE the toolCallUpdate carrying the diff arrives, so the preview
-    // would attach to an orphaned node. Keeping the group (chevron + body) makes a
-    // single edit behave exactly like a multi-tool batch, which already works, in both
-    // the live and replay orderings.
+    // A lone edit/write is NOT flattened to a `.tool-flat` (icon + label only). The
+    // edit's review surface (the `+A −R` stat + the expandable inline diff) is
+    // attached to the tool-item in the group body; on restore
+    // renderRestoredPermissionForTool closes the group BEFORE the toolCallUpdate
+    // carrying the diff arrives, so a flattened lone edit would drop it. Keeping the
+    // group (chevron + body + header totals) makes a single edit behave exactly like
+    // a multi-tool batch, in both the live and replay orderings (#30).
     if (calls.length === 1 && categorize(calls[0]) !== "edit") {
       const flat = document.createElement("div");
       flat.className = "tool-flat";
@@ -2005,13 +2064,31 @@
       lbl.className = "tool-label";
       lbl.textContent = toolLabel(calls[0]);
       flat.appendChild(lbl);
+      // #41: a lone command's expandable detail (full command + output) moves
+      // into the flat row — moving the NODES keeps the pendingCommandDetails
+      // reference valid, so an output that lands after the flatten still
+      // attaches.
+      const detailsEl = el.querySelector(".tool-item-details");
+      if (detailsEl) {
+        const chev = el.querySelector(".tool-item .tool-chevron");
+        if (chev) flat.appendChild(chev);
+        flat.appendChild(detailsEl);
+        wireCommandToggle(flat, detailsEl);
+      }
       el.replaceWith(flat);
       const fail = calls[0].toolCallId && state.toolFailuresById.get(calls[0].toolCallId);
       if (fail) applyToolFailure(flat, fail); // a single tool that failed carries its error
     } else {
       el.classList.remove("in-progress");
       const hdr = el.querySelector(".tool-group-header");
-      hdr.querySelector(".tool-group-label").textContent = summarizeTools(calls);
+      const label = hdr.querySelector(".tool-group-label");
+      label.textContent = summarizeTools(calls); // wipes the totals slot…
+      paintGroupDiffTotals(el); // …so "Edited N files" re-gains its "· +A −R" roll-up
+      // Settle the finished group to its effective expand state: the latch if
+      // set, else auto-open when it has a command/diff detail (Expand tool details).
+      // Skipped once the user has toggled this group themselves — expanding a
+      // running batch to watch it must not be undone the moment it finishes.
+      if (!el._userToggled) setGroupExpanded(el, groupShouldExpand(el));
     }
     state.activeToolGroupEl = null;
   }
@@ -2044,6 +2121,9 @@
       el.appendChild(body);
       messagesEl.appendChild(el);
       state.activeToolGroupEl = el;
+      // Expand-all latched → open the group the moment it appears, mid-run
+      // (setGroupExpanded's `.expanded` class also reveals the chevron via CSS).
+      if (state.toolExpandOverride === true) setGroupExpanded(el, true);
     }
 
     const el = state.activeToolGroupEl;
@@ -2053,65 +2133,588 @@
 
     const item = document.createElement("div");
     item.className = "tool-item";
-    item.textContent = toolLabel(call);
+    // Label in its own span so it can single-line ellipsize (long grep
+    // patterns / commands must truncate, not wrap) while the details block
+    // still breaks onto its own full-width row.
+    const itemLabel = document.createElement("span");
+    itemLabel.className = "tool-item-label";
+    itemLabel.textContent = toolLabel(call);
+    item.appendChild(itemLabel);
     body.appendChild(item);
     if (call.toolCallId) state.toolItemsByToolCallId.set(call.toolCallId, item);
+    // #41: a shell command's row carries an expandable detail — the FULL
+    // command text immediately (grok truncates its titles), and the complete
+    // captured output once the terminal finishes.
+    const cmd = call.rawInput && typeof call.rawInput.command === "string" ? call.rawInput.command.trim() : "";
+    if (cmd) attachCommandDetails(item, cmd, call.toolCallId);
 
     hdr.innerHTML =
       toolIconFor(el._calls) +
       `<span class="tool-group-label">${escapeHtml(inProgressLabel(call))}</span>` +
       `<span class="tool-dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span>` +
       `<span class="tool-chevron" aria-hidden="true">${ICON.chevronRight}</span>`;
+    // The rebuild above wipes the header's totals slot — re-paint it, or an edit
+    // whose diff already landed would lose its "· +A −R" the moment the NEXT tool in
+    // the batch starts (and only get it back at batch close).
+    paintGroupDiffTotals(el);
+    // A lone in-progress COMMAND is expandable immediately — its chevron shows
+    // now (multi-tool groups keep theirs until the batch closes), and
+    // expanding also opens the row's IN/OUT detail so one click reveals the
+    // full command mid-run.
+    el.classList.toggle(
+      "cmd-single",
+      el._calls.length === 1 && !!(call.rawInput && (call.rawInput.command || call.rawInput.cmd)),
+    );
     hdr.onclick = () => {
       const expanded = !body.hidden;
+      // The user has stated an intent for THIS group: don't let closeToolGroup's
+      // automatic settle undo it when the batch finishes. An explicit global
+      // action (the gear setting or the Expand/Collapse All latch) still wins —
+      // that runs through applyExpandCommandOutputs, which force-applies.
+      el._userToggled = true;
       body.hidden = expanded;
       el.classList.toggle("expanded", !expanded);
+      if (!expanded && el.classList.contains("cmd-single")) {
+        const d = body.querySelector(".tool-item-details");
+        const row = body.querySelector(".tool-item.has-details");
+        if (d && d.hidden) {
+          d.hidden = false;
+          if (row) row.classList.add("expanded");
+        }
+      }
     };
     scrollToBottom();
   }
 
-  function attachDiffPreviewToToolItem(toolCallId, diff) {
+  // #41: expandable per-command detail — a Claude-Code-style IN/OUT block on
+  // the shared code-chip surface. Created with the full command the moment the
+  // row appears (grok truncates its titles); the captured output (host-side
+  // snapshot at terminal/release — the same bytes grok received) lands later
+  // via the commandOutput message. Always available, collapsed by default;
+  // the row carries the same chevron + hover affordance as a tool-group
+  // header. Shared by grouped rows and the lone flat row (closeToolGroup
+  // moves the chevron + details nodes into the flat form).
+  // Effective expand state, given the per-session latch (toolExpandOverride)
+  // takes precedence over the persisted grok.expandCommandOutputs default.
+  //   - override set  → force everything to the override (all groups, all boxes).
+  //   - override null → the setting: every detail box (command IN/OUT, edit diff)
+  //                     opens, and only GROUPS that HOLD a detail auto-open —
+  //                     command or edit groups, but not read/explore-only ones.
+  // `groupShouldExpand` needs the element to decide the has-detail case;
+  // `detailShouldExpand` is group-agnostic.
+  function groupShouldExpand(el) {
+    if (state.toolExpandOverride !== null) return state.toolExpandOverride;
+    return state.expandCommandOutputs && !!(el && el.querySelector(".has-details"));
+  }
+  function detailShouldExpand() {
+    if (state.toolExpandOverride !== null) return state.toolExpandOverride;
+    return state.expandCommandOutputs;
+  }
+  // Open/close a group's body + chevron (safe on an in-progress group — the CSS
+  // shows the chevron once `.expanded` is set even mid-run).
+  function setGroupExpanded(el, open) {
+    const body = el.querySelector(".tool-group-body");
+    if (!body) return;
+    body.hidden = !open;
+    el.classList.toggle("expanded", open);
+  }
+  function setDetailExpanded(row, open) {
+    const d = row.querySelector(".tool-item-details");
+    if (!d) return;
+    d.hidden = !open;
+    row.classList.toggle("expanded", open);
+  }
+
+  // Re-apply the effective expand state to the WHOLE transcript. Called when the
+  // persisted setting changes (gear/config) and when the latch flips. Respects
+  // the latch via the effective helpers; touches the in-progress group too so a
+  // running batch opens/closes live (the reported gap).
+  function applyExpandCommandOutputs() {
+    for (const row of messagesEl.querySelectorAll(".has-details")) {
+      setDetailExpanded(row, detailShouldExpand());
+    }
+    for (const group of messagesEl.querySelectorAll(".tool-group")) {
+      setGroupExpanded(group, groupShouldExpand(group));
+    }
+  }
+
+  // Command Palette: Grok: Expand/Collapse All Tool Details (This Session). Sets
+  // the per-session latch, then re-applies it everywhere — so it (a) opens the
+  // batch that's still executing and (b) keeps applying to tool calls that
+  // arrive later this session, until you collapse-all or change the gear setting
+  // (last action wins). Broader than the setting: it opens EVERY group, incl.
+  // explore/edit-only ones.
+  function setAllToolDetails(open) {
+    state.toolExpandOverride = !!open;
+    applyExpandCommandOutputs();
+  }
+
+  function wireCommandToggle(rowEl, details, title) {
+    rowEl.classList.add("has-details"); // hover highlight + chevron = "this one is clickable"
+    rowEl.classList.toggle("expanded", !details.hidden);
+    rowEl.title = title || "Show full command and output";
+    rowEl.addEventListener("click", (e) => {
+      if (e.target.closest("a, button")) return; // preview links keep their own click
+      if (e.target.closest(".tool-item-details")) return; // selecting text inside must not collapse
+      details.hidden = !details.hidden;
+      rowEl.classList.toggle("expanded", !details.hidden); // › ↔ v
+    });
+  }
+
+  function attachCommandDetails(item, command, toolCallId) {
+    // Chevron at the END of the (possibly ellipsized) command line: › when
+    // collapsed, rotated to v while expanded.
+    const chevron = document.createElement("span");
+    chevron.className = "tool-chevron";
+    chevron.setAttribute("aria-hidden", "true");
+    chevron.innerHTML = ICON.chevronRight;
+    item.appendChild(chevron);
+
+    const details = document.createElement("div");
+    details.className = "tool-item-details";
+    details.hidden = !detailShouldExpand(); // latch, else grok.expandCommandOutputs, opens new rows pre-expanded
+    const block = document.createElement("div");
+    block.className = "cmd-block";
+    const inRow = document.createElement("div");
+    inRow.className = "cmd-io";
+    const inTag = document.createElement("span");
+    inTag.className = "cmd-io-tag";
+    inTag.textContent = "IN";
+    inRow.appendChild(inTag);
+    const cmd = document.createElement("pre");
+    cmd.className = "tool-cmd";
+    cmd.textContent = command;
+    inRow.appendChild(cmd);
+    block.appendChild(inRow);
+    details.appendChild(block);
+    item.appendChild(details);
+
+    wireCommandToggle(item, details);
+    // toolCallId lets the completed tool_call_update attach output by id (the
+    // cursor/Composer path); command lets the terminal commandOutput attach by
+    // string (the grok-build path). Both reference the same `details` node.
+    state.pendingCommandDetails.push({ command, details, done: false, toolCallId });
+  }
+
+  function attachCommandOutput(details, msg) {
+    const block = details.querySelector(".cmd-block");
+    if (!block || block.querySelector(".cmd-out")) return; // idempotent (buffer replay)
+    const outRow = document.createElement("div");
+    outRow.className = "cmd-io cmd-out";
+    const tag = document.createElement("span");
+    tag.className = "cmd-io-tag";
+    tag.textContent = "OUT";
+    outRow.appendChild(tag);
+    const body = document.createElement("div");
+    body.className = "cmd-out-body";
+    const output = typeof msg.output === "string" ? msg.output : "";
+    const hasOutput = output.trim() !== "";
+    // Success is silent (exit 0 = just the output); failure gets an [Error]
+    // marker + error tint; a kill is not an error.
+    if (msg.exitCode != null && msg.exitCode !== 0) {
+      outRow.classList.add("failed");
+      const mark = document.createElement("div");
+      mark.className = "cmd-out-marker";
+      mark.textContent = `[Error] exit ${msg.exitCode}`;
+      body.appendChild(mark);
+      // Roll the failure up to the ROW + GROUP so a non-zero command reads as an
+      // error at a glance — consistent with a status:"failed" tool (markToolFailed).
+      // The `[Error] exit N` above is the OUT-block detail; this is the summary
+      // signal. No extra `.tool-error` text — the OUT marker already carries it.
+      const row = details.closest && details.closest(".tool-item, .tool-flat");
+      if (row) {
+        row.classList.add("tool-failed");
+        const group = row.closest && row.closest(".tool-group");
+        if (group) group.classList.add("has-error");
+      }
+    } else if (msg.exitCode == null) {
+      const mark = document.createElement("div");
+      mark.className = "cmd-out-marker muted";
+      mark.textContent = "[Cancelled] no exit code";
+      body.appendChild(mark);
+    } else if (!hasOutput) {
+      // exit 0 with nothing on stdout: a bare "(no output)" pre read as broken.
+      // A muted "done" marker (process success, not a claim about the task) is
+      // clearer, and there's no empty <pre> to feel like a gap.
+      const mark = document.createElement("div");
+      mark.className = "cmd-out-marker ok";
+      mark.textContent = "✓ done · no output";
+      body.appendChild(mark);
+    }
+    // Only render the output <pre> when there's actually output — a marker alone
+    // carries the empty cases (success/error/cancel).
+    if (hasOutput) {
+      const out = document.createElement("pre");
+      out.className = "tool-cmd-output";
+      out.textContent = output;
+      body.appendChild(out);
+    }
+    if (msg.truncated) {
+      const note = document.createElement("div");
+      note.className = "cmd-out-marker muted";
+      note.textContent = "output truncated — grok saw the same cut";
+      body.appendChild(note);
+    }
+    outRow.appendChild(body);
+    block.appendChild(outRow);
+  }
+
+  // #41 for the cursor/Composer agent: it runs commands in its own CLI-side shell
+  // (no terminal/create), so `commandOutput` never fires for its rows. Its output
+  // rides the completed `tool_call_update` instead — attach it to the row by
+  // toolCallId (reliable + order-independent; Composer completes out of order).
+  // Returns true only when it actually filled an empty command row, so the caller
+  // skips the generic failure/diff path for it. A no-op for grok-build, whose
+  // terminal `commandOutput` already populated the row before this update arrives.
+  function maybeAttachToolResultOutput(call) {
+    const id = call && call.toolCallId;
+    if (!id) return false;
+    // Use the pendingCommandDetails entry (a direct `details` node reference that
+    // survives a lone command's flatten-move) rather than re-querying the item —
+    // the item's details node is relocated to the .tool-flat wrapper.
+    const entry = state.pendingCommandDetails.find((p) => p.toolCallId === id);
+    if (!entry) return false;
+    const block = entry.details.querySelector(".cmd-block");
+    if (!block || block.querySelector(".cmd-out")) return false; // OUT already present (grok-build)
+    const res = extractToolResultOutput(call);
+    if (!res) return false;
+    attachCommandOutput(entry.details, res);
+    return true;
+  }
+
+  // Render one edit region as a colored inline diff on the shared code-block
+  // surface (`.code-block.diff` + `.diff-line`, the same styling ` ```diff `
+  // message fences use). grok only sends the replaced region (old/new strings),
+  // so computeLineDiff produces the +/-/context lines; a "+"/"-"/" " gutter goes
+  // in front of each so the diff reads (and copies) as a real unified diff even
+  // for colorblind users. Long regions cap the rendered rows (the full change is
+  // one "open diff →" click away in the native editor).
+  const MAX_INLINE_DIFF_LINES = 400;
+  // A wire line number is only usable if it's a real 1-based file line; anything
+  // else (absent, 0, negative, non-integer) falls back to the old region-relative 1.
+  function fileLineOr1(v) {
+    return typeof v === "number" && Number.isFinite(v) && v >= 1 ? Math.floor(v) : 1;
+  }
+  // A quiet hairline marking a jump in file lines between two hunks of the SAME
+  // edit — a replace_all's sites sit at scattered lines (3, 5, 7…), so without it
+  // two hunks read as one continuous run. The line numbers say where we jumped to;
+  // this only has to stop the eye from joining them.
+  function makeHunkSeparator() {
+    const sep = document.createElement("div");
+    sep.className = "tdl-sep";
+    sep.setAttribute("aria-hidden", "true");
+    return sep;
+  }
+
+  // Render ONE diff block as a single scrollable region containing one hunk per
+  // replaced SITE (`hunks` = [{site, result}] — see extractDiffSites). One region
+  // per BLOCK, never per site: `.tool-diff-region` scrolls at 320px, so a
+  // 148-occurrence replace would otherwise stack 148 nested scroll boxes.
+  //
+  // Codex-style rows: a line-number gutter + a colored left-border stripe + a subtle
+  // per-line background (green add / red del). A small +/- glyph sits right by the
+  // border for color-blind readability. A del shows the OLD-side number, an
+  // add/context the NEW-side number -- unified-diff local numbering.
+  //
+  // The numbers are REAL file lines: each site carries its position (1-based), so
+  // the counters seed from it. Falls back to 1 when absent (older builds, the
+  // whole-file-Write echo, hand-built fixtures) -- the region-relative numbering we
+  // used to always emit.
+  function buildInlineDiffRegion(hunks) {
+    const wrap = document.createElement("div");
+    wrap.className = "tool-diff-region";
+    let widest = 0;
+    let rendered = 0;
+    let total = 0;
+    let truncated = false;
+    for (const h of hunks) {
+      total += h.result.lines.length;
+      if (h.result.truncated) truncated = true;
+    }
+    // MAX_INLINE_DIFF_LINES is a budget ACROSS the block's hunks, not per hunk —
+    // 1000 sites must not paint 2000 rows. The +N −M stat is summed over EVERY
+    // site regardless (attachDiffPreviewToToolItem), so capping the render never
+    // understates the change.
+    let prevNewEnd = null;
+    for (const { site, result } of hunks) {
+      if (rendered >= MAX_INLINE_DIFF_LINES) break;
+      const rows = result.lines;
+      let oldNo = fileLineOr1(site && site.oldLine);
+      let newNo = fileLineOr1(site && site.newLine);
+      // Only between hunks, and only when the new side actually skipped lines.
+      if (prevNewEnd !== null && newNo !== prevNewEnd) wrap.appendChild(makeHunkSeparator());
+      const shown = Math.min(rows.length, MAX_INLINE_DIFF_LINES - rendered);
+      for (let i = 0; i < shown; i++) {
+        const ln = rows[i];
+        const isAdd = ln.type === "add";
+        const isDel = ln.type === "del";
+        const row = document.createElement("div");
+        row.className = "tdl" + (isAdd ? " tdl-add" : isDel ? " tdl-del" : "");
+        const sign = document.createElement("span");
+        sign.className = "tdl-sign";
+        sign.textContent = isAdd ? "+" : isDel ? "-" : "";
+        const num = document.createElement("span");
+        num.className = "tdl-num";
+        let shownNo;
+        if (isAdd) shownNo = newNo++;
+        else if (isDel) shownNo = oldNo++;
+        else { shownNo = newNo++; oldNo++; }
+        num.textContent = String(shownNo);
+        if (shownNo > widest) widest = shownNo;
+        const code = document.createElement("span");
+        code.className = "tdl-code";
+        code.textContent = ln.text === "" ? " " : ln.text;
+        row.appendChild(sign);
+        row.appendChild(num);
+        row.appendChild(code);
+        wrap.appendChild(row);
+      }
+      rendered += shown;
+      prevNewEnd = newNo;
+    }
+    // Size the gutter to the widest number actually rendered, +1ch of slack so a
+    // number never butts against the code column. Floored at 4ch, which is exactly
+    // today's look for everything up to 999; only a 1000+ line file grows it. A
+    // fixed track would instead overflow — 5 digits would collide with the +/- glyph.
+    wrap.style.setProperty("--tdl-num-w", Math.max(4, String(widest).length + 1) + "ch");
+    const remaining = total - rendered;
+    if (remaining > 0 || truncated) {
+      const more = document.createElement("div");
+      more.className = "tool-diff-more";
+      more.textContent = "... " + remaining + " more line(s) - open diff for the full change";
+      wrap.appendChild(more);
+    }
+    return wrap;
+  }
+
+  // Attach an edit's review surface to its tool row: an always-visible `+A −R`
+  // count (so a collapsed group is still auditable) plus an expandable detail
+  // holding the inline diff(s) + the native "open diff →" link. Rides the exact
+  // same expand machinery as a command's IN/OUT block — the row becomes
+  // `has-details`, governed by grok.expandCommandOutputs / the Expand-All latch /
+  // a per-row click (wireCommandToggle). `diffs` is an ARRAY: a single tool call
+  // can carry more than one region.
+  function attachDiffPreviewToToolItem(toolCallId, diffs) {
     const item = state.toolItemsByToolCallId.get(toolCallId);
-    if (!item || item.querySelector(".preview-link")) return; // already attached
-    const oldLines = (diff.oldText || "").split("\n").length;
-    const newLines = (diff.newText || "").split("\n").length;
-    const sub = document.createElement("div");
-    sub.className = "tool-item-subtitle";
-    sub.textContent = `${oldLines} → ${newLines} lines`;
-    item.appendChild(sub);
-    const preview = document.createElement("button");
-    preview.className = "preview-link";
-    preview.textContent = "open diff →";
-    preview.onclick = (e) => {
-      e.stopPropagation(); // don't toggle the tool-group expand/collapse
-      vscode.postMessage({
-        type: "openDiff",
-        path: diff.path,
-        oldText: diff.oldText,
-        newText: diff.newText,
-      });
-    };
-    item.appendChild(preview);
+    if (!item) return;
+    // grok reports an edit's diff TWICE (research/edit-diff.md § Two updates per
+    // edit): first an optimistic pre-write echo, then the authoritative completed
+    // update. For a search_replace the two are byte-identical, but a whole-file
+    // Write's echo carries oldText:"" — it hasn't read the old content yet — while
+    // the completed one carries the real prior content. So a repaint with a
+    // DIFFERENT diff must WIN (an overwrite otherwise renders as pure adds forever,
+    // since the echo lands first); a byte-identical repaint is a no-op, which is
+    // what keeps buffer replay idempotent.
+    const sig = JSON.stringify(diffs);
+    if (item._diffSig === sig) return;
+    const existing = item.querySelector(".tool-item-details");
+    if (existing && !existing.classList.contains("tool-item-diff")) return; // a command's IN/OUT owns this row
+    item._diffSig = sig;
+
+    // Count over EVERY site of every block — that's the whole point of expanding
+    // details[]: a 148-occurrence replace_all is +148 −148, not the "+1 −1" the
+    // token-sized block-level oldText/newText would report. The render is capped
+    // (buildInlineDiffRegion), the counts never are.
+    let added = 0;
+    let removed = 0;
+    const blocks = [];
+    for (const diff of diffs) {
+      const hunks = [];
+      for (const site of diff.sites) {
+        const result = computeLineDiff(site.oldText, site.newText);
+        added += result.added;
+        removed += result.removed;
+        hunks.push({ site, result });
+      }
+      blocks.push({ diff, hunks });
+    }
+    item._diffStat = { added, removed, path: diffs[0] && diffs[0].path };
+
+    // Always-visible +A −R on the row (and the roll-up onto the group header).
+    const stat = makeDiffStat(added, removed);
+    const prevStat = item.querySelector(".diff-stat");
+    if (prevStat) prevStat.replaceWith(stat);
+    else item.appendChild(stat);
+    recomputeGroupDiffTotals(item);
+
+    // On a repaint, REUSE the existing detail node: swapping in a new one would
+    // leave wireCommandToggle's click listener bound to the detached node (and
+    // double-bind a second), and reusing it preserves whatever expand state the row
+    // is already in.
+    let details = existing;
+    const fresh = !details;
+    if (fresh) {
+      const chevron = document.createElement("span");
+      chevron.className = "tool-chevron";
+      chevron.setAttribute("aria-hidden", "true");
+      chevron.innerHTML = ICON.chevronRight;
+      item.appendChild(chevron);
+
+      details = document.createElement("div");
+      details.className = "tool-item-details tool-item-diff";
+      details.hidden = !detailShouldExpand();
+    }
+    while (details.firstChild) details.removeChild(details.firstChild);
+    // One region + ONE "open diff →" per BLOCK (not per site) — the link's payload
+    // stays the block's own oldText/newText, which is what the native diff editor wants.
+    for (const { diff, hunks } of blocks) {
+      details.appendChild(buildInlineDiffRegion(hunks));
+      const preview = document.createElement("button");
+      preview.className = "preview-link";
+      preview.textContent = "open diff →";
+      preview.onclick = (e) => {
+        e.stopPropagation(); // don't toggle the row/group expand
+        vscode.postMessage({ type: "openDiff", path: diff.path, oldText: diff.oldText, newText: diff.newText });
+      };
+      details.appendChild(preview);
+    }
+    if (fresh) {
+      item.appendChild(details);
+      wireCommandToggle(item, details, "Show the diff");
+    }
     scrollToBottom();
   }
 
-  // Extract any `type:"diff"` blocks from a tool call's `content` and attach the
-  // "N → M lines" + "open diff →" preview. grok delivers the diff differently by
-  // path: LIVE it rides a `tool_call_update` (the `tool_call` is a bare
-  // "StrReplace" with no content), but on session/load REPLAY the whole edit
-  // collapses into a single completed `tool_call` that carries the diff itself —
-  // there is no separate update. So this must run for BOTH message kinds, else a
-  // restored edit shows an expandable group with no diff inside it (#30).
+  // "+A −R" pill for an edit row (green additions, red removals). Uses a real
+  // minus sign; 0 sides still render so the change magnitude is unambiguous.
+  function makeDiffStat(added, removed) {
+    const sub = document.createElement("span");
+    sub.className = "tool-item-subtitle diff-stat";
+    const a = document.createElement("span");
+    a.className = "diff-stat-add";
+    a.textContent = `+${added}`;
+    const d = document.createElement("span");
+    d.className = "diff-stat-del";
+    d.textContent = `−${removed}`;
+    sub.appendChild(a);
+    sub.appendChild(document.createTextNode(" "));
+    sub.appendChild(d);
+    return sub;
+  }
+
+  // Roll the group's edit counts up onto its header so it can show totals
+  // ("Edited 1 file · +7 −2"), and re-paint them immediately — the counts track each
+  // edit AS IT LANDS, not only once the batch closes. Files are de-duped by path —
+  // grok emits one edit call per change, so two edits to one file must still read
+  // "Edited 1 file" (matching summarizeTools' path-dedup), not 2.
+  //
+  // Recomputed from the rows' current `_diffStat` rather than accumulated
+  // incrementally, so a row REPAINTED with the authoritative diff (see
+  // attachDiffPreviewToToolItem) replaces its earlier counts instead of
+  // double-counting them into the group.
+  function recomputeGroupDiffTotals(item) {
+    const group = item.closest && item.closest(".tool-group");
+    if (!group) return;
+    const t = { added: 0, removed: 0, files: new Set() };
+    let anon = 0;
+    for (const row of group.querySelectorAll(".tool-item")) {
+      const s = row._diffStat;
+      if (!s) continue;
+      t.added += s.added;
+      t.removed += s.removed;
+      t.files.add(s.path || "__anon" + anon++);
+    }
+    group._diffTotals = t;
+    paintGroupDiffTotals(group);
+  }
+
+  // Paint the group's rolled-up edit totals onto its header label, so "Editing
+  // x.ts"/"Edited N files" is auditable at a glance without expanding. Runs in BOTH
+  // states — while the batch is still in progress (each edit's counts show the
+  // moment its diff lands) and after closeToolGroup rewrites the label.
+  //
+  // The totals live in their own span so a re-paint REPLACES them instead of
+  // appending a second copy. Two things wipe the slot, and both re-paint right
+  // after: addToToolGroup rebuilds the header's innerHTML on every new call in the
+  // batch, and closeToolGroup resets the label's textContent. No-op for a group with
+  // no edits.
+  function paintGroupDiffTotals(group) {
+    if (!group) return;
+    const labelEl = group.querySelector(".tool-group-label");
+    if (!labelEl) return;
+    const prev = labelEl.querySelector(".tool-group-diff-totals");
+    if (prev) prev.remove();
+    const t = group._diffTotals;
+    if (!t || (t.added === 0 && t.removed === 0)) return;
+    const slot = document.createElement("span");
+    slot.className = "tool-group-diff-totals";
+    slot.appendChild(document.createTextNode(" · "));
+    slot.appendChild(makeDiffStat(t.added, t.removed));
+    labelEl.appendChild(slot);
+  }
+
+  // Extract every `type:"diff"` block from a tool call's `content` and render the
+  // inline edit diff. grok delivers the diff differently by path: LIVE it rides the
+  // `tool_call_update`s (the `tool_call` carries the edit's rawInput args but no
+  // `content`), but on session/load REPLAY the whole edit collapses into a single
+  // completed `tool_call` that carries the diff itself — no separate update. So this
+  // must run for BOTH message kinds, else a restored edit shows an expandable group
+  // with no diff inside it (#30).
+  // Expand a diff block into one hunk per replaced SITE.
+  //
+  // The block's own oldText/newText is the search *pattern*, so for a replace_all it
+  // is token-sized by design — rendering it alone shows a 148-occurrence rename as a
+  // single meaningless "+1 −1" hunk. `_meta.details[]` is the only complete account:
+  // one entry per site, each with its real 1-based file lines. The THREE delivery
+  // shapes carry it differently:
+  //   echo (pre-write)  → no details[]; block _meta {old_line,new_line} is the FIRST
+  //                       site only → one approximate hunk, upgraded by the completed
+  //                       update (a different _diffSig, so the repaint wins)
+  //   completed         → details[], one entry per site (block _meta has no lines)
+  //   session/load      → same as completed
+  //   whole-file Write  → echo _meta is {} (seed 1); completed details[] length 1
+  //
+  // `line_prefix` is the text BEFORE the match on that line, so prepending it turns a
+  // bare "PLACEHOLDER" into "item 1: the token is PLACEHOLDER". There is NO
+  // line_suffix on the wire — the tail of the line is genuinely unavailable, and
+  // reconstructing it from a neighbour's context_before is fragile (and impossible for
+  // the last site), so the hunk is prefix-only. Still strictly better than the token.
+  //
+  // Note `old_line` is a POST-edit coordinate; it equals `new_line` in every capture
+  // so far, so it's only a true old-side line for line-count-neutral edits (the common
+  // token-rename case). See research/edit-diff.md § Line numbers + replace-all.
+  function extractDiffSites(meta, oldText, newText) {
+    const details = meta && Array.isArray(meta.details) ? meta.details : null;
+    if (details && details.length) {
+      const sites = [];
+      for (const d of details) {
+        // An entry that names no strings doesn't describe a site — it can't be
+        // expanded, only positioned (handled below).
+        if (!d || (typeof d.old_string !== "string" && typeof d.new_string !== "string")) continue;
+        const old = typeof d.old_string === "string" ? d.old_string : "";
+        const nw = typeof d.new_string === "string" ? d.new_string : "";
+        // A creation (no prior content — a new file's details[0] is old_string:"")
+        // has no line to prefix; keep "" so it reads as a pure add instead of
+        // inventing a deleted line out of the prefix.
+        const pre = old === "" || typeof d.line_prefix !== "string" ? "" : d.line_prefix;
+        sites.push({ oldText: old === "" ? "" : pre + old, newText: pre + nw, oldLine: d.old_line, newLine: d.new_line });
+      }
+      if (sites.length) return sites;
+      const first = details[0] || {};
+      return [{ oldText, newText, oldLine: first.old_line, newLine: first.new_line }];
+    }
+    return [{ oldText, newText, oldLine: meta && meta.old_line, newLine: meta && meta.new_line }];
+  }
+
   function applyToolDiffs(call) {
     const c = call?.content;
     if (!Array.isArray(c)) return;
+    const diffs = [];
     for (const item of c) {
       if (item?.type === "diff") {
-        const diff = { path: item.path, oldText: item.oldText ?? "", newText: item.newText ?? "" };
-        state.pendingDiffByToolCallId.set(call.toolCallId, diff);
-        attachDiffPreviewToToolItem(call.toolCallId, diff);
+        const oldText = item.oldText ?? "";
+        const newText = item.newText ?? "";
+        diffs.push({
+          path: item.path,
+          oldText, // block-level: the "open diff →" payload + the permission card's line count
+          newText,
+          sites: extractDiffSites(item._meta, oldText, newText),
+        });
       }
     }
+    if (!diffs.length) return;
+    state.pendingDiffByToolCallId.set(call.toolCallId, diffs[0]); // permission card / openDiff use the first
+    attachDiffPreviewToToolItem(call.toolCallId, diffs);
   }
 
   // Render a tool failure on its row: the row goes error-colored and the reason
@@ -2291,6 +2894,7 @@
     const result = cleanSubagentOutput(output || "");
     if (!result) return;
     body.innerHTML = `<div class="subagent-result-label">Output of the subagent:</div>` + renderMarkdown(result);
+    applyAutoDir(body);
     const row = el.querySelector(".subagent-row");
     row.classList.add("expandable");
     row.title = "Show the subagent's result";
@@ -2303,22 +2907,36 @@
   // event (and a re-focus replays both) — so this is idempotent, except that a
   // late duplicate may still fill in a missing duration or result.
   function finishSubagentCard(el, info) {
+    const failed = !!info.failed;
+    const cancelled = !!info.cancelled && !failed;
+    const ms = typeof info.durationMs === "number" ? info.durationMs : null;
+    const dur = ms != null ? `· ${Math.max(1, Math.round(ms / 1000))}s` : "";
+    // A failure/cancel is visible on the row itself ("· failed"/"· cancelled",
+    // red via .subagent-failed CSS, muted via .subagent-cancelled) — you
+    // shouldn't have to expand the result to see it went wrong.
+    const statusWord = failed ? "failed" : cancelled ? "cancelled" : "";
+    const timeText = statusWord ? (dur ? `· ${statusWord} ${dur}` : `· ${statusWord}`) : dur;
     if (el.classList.contains("subagent-done")) {
-      const lateMs = typeof info.durationMs === "number" ? info.durationMs : null;
+      // Already finished (a tool-channel completion routinely races ahead of the
+      // lifecycle finish for the SAME card) — upgrade a missing duration AND a
+      // not-yet-shown failure/cancel marker, the two things a later event adds.
+      if (failed) el.classList.add("subagent-failed");
+      if (cancelled && !el.classList.contains("subagent-failed")) el.classList.add("subagent-cancelled");
       const timeEl = el.querySelector(".subagent-time");
-      if (lateMs != null && timeEl && !timeEl.textContent) {
-        timeEl.textContent = `· ${Math.max(1, Math.round(lateMs / 1000))}s`;
+      if (timeEl) {
+        if (statusWord) timeEl.textContent = timeText;
+        else if (ms != null && !timeEl.textContent) timeEl.textContent = dur;
       }
       setSubagentResult(el, info.output);
       return;
     }
     el.classList.add("subagent-done");
+    if (failed) el.classList.add("subagent-failed");
+    else if (cancelled) el.classList.add("subagent-cancelled");
     const dots = el.querySelector(".blink-dots");
     if (dots) dots.remove();
-    const ms = typeof info.durationMs === "number" ? info.durationMs : null;
-    if (ms != null) {
-      el.querySelector(".subagent-time").textContent = `· ${Math.max(1, Math.round(ms / 1000))}s`;
-    }
+    const timeEl = el.querySelector(".subagent-time");
+    if (timeEl) timeEl.textContent = timeText;
     // cleanSubagentOutput strips the CLI envelope (plumbing tags, boilerplate
     // lead-ins, one wrapping <response> pair, the trailing Agent ID hint) so
     // only the child's actual words render — as markdown, since subagent
@@ -2334,7 +2952,7 @@
     el.className = "subagent-card";
     el.innerHTML =
       `<div class="subagent-row">` +
-        `<span class="subagent-badge">${ICON.listTree || "🤖"}</span>` +
+        `<span class="subagent-badge">${ICON.bot || "🤖"}</span>` +
         `<span class="subagent-label">Subagent</span>` +
         `<span class="subagent-sep">·</span>` +
         `<span class="subagent-title"></span>` +
@@ -2343,6 +2961,12 @@
       `</div>` +
       `<div class="subagent-result" hidden></div>`;
     setSubagentTitle(el, call);
+    // Cards rebuilt by a cold restore never receive their own subagent_spawned
+    // (session/load strips the lifecycle rail), so they'd sit permanently
+    // untagged — a magnet for a LATER live spawn's FIFO tag, corrupting the old
+    // card with the new run's duration/output. Mark them so live spawn-tagging
+    // and the no-id finish fallback skip them.
+    if (state.replaying) el.dataset.subagentReplayed = "1";
     messagesEl.appendChild(el);
     if (call && call.toolCallId) state.subagentCards.set(call.toolCallId, el);
     applySubagentUpdate(call, el); // a replayed call may already be completed
@@ -2363,7 +2987,7 @@
     // duration (the subagent_finished lifecycle event fills that in).
     const out = call && call.rawOutput;
     const status = String(call?.status || "").toLowerCase();
-    const finished = status === "completed" || status === "failed" ||
+    const finished = status === "completed" || status === "failed" || status === "cancelled" ||
       (out && out.type === "SubagentCompleted");
     if (!finished) return;
     // Output lives in rawOutput.output (SubagentCompleted), rawOutput.text
@@ -2381,23 +3005,28 @@
       if (ackId && !el.dataset.subagentId) el.dataset.subagentId = ackId[1];
       return;
     }
+    // Thread the failure/cancel through the tool-channel path too — not just the
+    // lifecycle rail — since the tool-channel completion is the common ordering.
     finishSubagentCard(el, {
       durationMs: out && typeof out.duration_ms === "number" ? out.duration_ms : null,
       output,
+      failed: status === "failed",
+      cancelled: status === "cancelled",
     });
   }
 
   // A background delegation's result arrives on the poller tool
   // (get_command_or_subagent_output), whose completed update carries
-  // rawOutput { type: "TaskOutput", Result: { task_id, duration_secs,
-  // output, … } } — finish the matching card. The poller's own row in the
-  // generic tool group is untouched (this hook doesn't consume the update).
+  // rawOutput { type: "TaskOutput", Result: { task_id, duration_secs, status,
+  // output, … } } — finish the matching card. Returns true when at least one
+  // card matched, so the caller can drop the redundant poller row.
   function maybeFinishSubagentFromTaskOutput(call) {
     const out = call && call.rawOutput;
-    if (!out || out.type !== "TaskOutput") return;
+    if (!out || out.type !== "TaskOutput") return false;
     const results = [];
     if (out.Result) results.push(out.Result);
     if (Array.isArray(out.Results)) results.push(...out.Results);
+    let matched = false;
     for (const res of results) {
       const tid = res && (res.task_id || res.taskId);
       if (!tid) continue;
@@ -2405,12 +3034,45 @@
         (c) => c.dataset.taskId === String(tid) || c.dataset.subagentId === String(tid),
       );
       if (!el) continue;
+      matched = true;
+      const status = String(res.status || "completed").toLowerCase();
       finishSubagentCard(el, {
         durationMs: typeof res.duration_secs === "number" ? Math.round(res.duration_secs * 1000)
           : typeof res.duration_ms === "number" ? res.duration_ms : null,
         output: typeof res.output === "string" ? res.output : "",
+        failed: status === "failed",
+        cancelled: status === "cancelled",
       });
     }
+    return matched;
+  }
+
+  // Cold restore (session/load) flattens a background delegation's poller output
+  // to a TEXT blob instead of the structured TaskOutput above (=== Task … === /
+  // Command: [subagent:…] / … / === Output ===). Parse it back so a restored card
+  // shows its result + duration; returns true so the caller drops the redundant
+  // poller row. A backgrounded shell command polls through the same tool, so
+  // parseSubagentTaskResult returns null for non-subagent blobs (row kept).
+  function maybeFinishSubagentFromTaskText(call) {
+    const out = call && call.rawOutput;
+    const text = toolUpdateText(call)
+      || (typeof out === "string" ? out : "")
+      || (out && typeof out.text === "string" ? out.text : "")
+      || (out && typeof out.output === "string" ? out.output : "");
+    if (!text) return false;
+    const parsed = parseSubagentTaskResult(text);
+    if (!parsed) return false;
+    const el = [...state.subagentCards.values()].find(
+      (c) => c.dataset.taskId === String(parsed.taskId) || c.dataset.subagentId === String(parsed.taskId),
+    );
+    if (!el) return false;
+    finishSubagentCard(el, {
+      durationMs: parsed.durationMs,
+      output: parsed.output,
+      failed: parsed.status === "failed",
+      cancelled: parsed.status === "cancelled",
+    });
+    return true;
   }
 
   function addPlanNotice(text) {
@@ -2419,6 +3081,24 @@
     const el = document.createElement("div");
     el.className = "plan-notice";
     el.innerHTML = `${ICON.listTree}<span>${escapeHtml(text)}</span>`;
+    messagesEl.appendChild(el);
+    scrollToBottom();
+  }
+
+  // Automatic (context-full) compaction note. The CLI can compact at a turn's
+  // START (no active bubble — clean) OR between tool-loop passes (an agent bubble
+  // may be live). Finalize that bubble first so the notice sits BETWEEN prior
+  // content and what follows — otherwise later answer tokens reuse the pre-notice
+  // bubble and render ABOVE the notice. Text arrives as markdown (italic).
+  function addAutoCompactNotice(text) {
+    flushAgent();
+    state.activeAgentEl = null;
+    state.activeAgentRaw = "";
+    clearWelcome();
+    hideGrokking();
+    const el = document.createElement("div");
+    el.className = "plan-notice";
+    el.innerHTML = `${ICON.zap}<span>${escapeHtml(text)}</span>`;
     messagesEl.appendChild(el);
     scrollToBottom();
   }
@@ -2494,6 +3174,7 @@
     state.agentRenderScheduled = false;
     if (!state.activeAgentEl) return;
     state.activeAgentEl.innerHTML = renderMarkdown(state.activeAgentRaw);
+    applyAutoDir(state.activeAgentEl);
     renderMermaidIn(state.activeAgentEl);
     const wrapper = state.activeAgentEl.parentElement;
     if (wrapper) wrapper._copyText = state.activeAgentRaw;
@@ -2601,6 +3282,7 @@
     const selBlocks = parseSelectionBlocks(parsed.body);
     const imageTags = parseImageTags(selBlocks.body);
     state.activeUserEl.innerHTML = renderMarkdown(imageTags.body);
+    applyAutoDir(state.activeUserEl);
     const msgEl = state.activeUserEl.closest(".msg");
     if (msgEl) msgEl._copyText = imageTags.body;
     const chipTags = [
@@ -3307,12 +3989,14 @@
     const body = document.createElement("div");
     body.className = "plan-body";
     body.innerHTML = planText ? renderMarkdown(planText) : "(empty plan)";
+    applyAutoDir(body);
     renderMermaidIn(body);
     el.appendChild(body);
 
     const feedback = document.createElement("textarea");
     feedback.className = "plan-feedback";
     feedback.rows = 2;
+    feedback.setAttribute("dir", "auto");
     feedback.placeholder = "Optional comment — Grok decides what to do with it";
     el.appendChild(feedback);
 
@@ -3377,6 +4061,7 @@
       body.className = "plan-body";
       body.hidden = true;
       body.innerHTML = text ? renderMarkdown(text) : "(empty plan)";
+      applyAutoDir(body);
       renderMermaidIn(body);
 
       el.appendChild(makePlanToggle(body));
@@ -3404,20 +4089,36 @@
       // relPath (Windows backslashes), so split("/") alone would show the whole
       // path instead of just the name. The full path stays on the tooltip below.
       const fileName = (chip.relPath.split(/[\\/]/).pop() || chip.relPath);
-      // A file the user explicitly uploaded (explicit chip, no selection range) gets
-      // its own removable row at the top. The active-editor file (implicit) and
-      // selection snippets stay in the toolbar with the hide/eye toggle.
-      const isUpload = !chip.id.startsWith("implicit:") && !chip.selectionStart;
-      if (isUpload) {
+      // A selection range shows on the label (`name:8-15`) and tooltip — the
+      // full name is kept (CSS ellipsis handles pathological lengths, no JS cut).
+      const hasSel = chip.selectionStart && chip.selectionEnd;
+      const range = hasSel
+        ? chip.selectionStart === chip.selectionEnd
+          ? `${chip.selectionStart}`
+          : `${chip.selectionStart}-${chip.selectionEnd}`
+        : "";
+      const rangeTitle = hasSel
+        ? chip.selectionStart === chip.selectionEnd
+          ? ` (line ${chip.selectionStart})`
+          : ` (lines ${chip.selectionStart}-${chip.selectionEnd})`
+        : "";
+      const label = range ? `${fileName}:${range}` : fileName;
+      // Explicit attachments — files, images, AND selections sent via the "Add
+      // Selection to Grok" command — get their own removable row at the top,
+      // like any other attached file. Only the ambient active-editor chip
+      // (implicit — whole file, or its live selection) stays in the bottom
+      // toolbar with the hide/eye toggle.
+      const isExplicit = !chip.id.startsWith("implicit:");
+      if (isExplicit) {
         const el = document.createElement("div");
         el.className = "attachment";
         // For a disk-imported image the interesting path is the ORIGINAL file,
         // not the staged copy the chip's path points at.
-        el.title = chip.originRelPath || chip.path;
+        el.title = (chip.originRelPath || chip.path) + rangeTitle;
         el.innerHTML = chip.imageIndex != null ? ICON.image : ICON.file;
-        const label = document.createElement("span");
-        label.textContent = fileName;
-        el.appendChild(label);
+        const span = document.createElement("span");
+        span.textContent = label;
+        el.appendChild(span);
         const rm = document.createElement("button");
         rm.type = "button";
         rm.className = "attachment-remove";
@@ -3430,21 +4131,9 @@
       }
       const el = document.createElement("div");
       el.className = "chip" + (chip.hidden ? " chip-hidden" : "");
-      // Mirror the live editor selection on the label (`name:8-15`) — the full
-      // name is kept (CSS ellipsis handles pathological lengths, no JS cut).
-      const hasSel = chip.selectionStart && chip.selectionEnd;
-      const range = hasSel
-        ? chip.selectionStart === chip.selectionEnd
-          ? `${chip.selectionStart}`
-          : `${chip.selectionStart}-${chip.selectionEnd}`
-        : "";
-      el.title = chip.path + (hasSel
-        ? (chip.selectionStart === chip.selectionEnd
-          ? ` (line ${chip.selectionStart})`
-          : ` (lines ${chip.selectionStart}-${chip.selectionEnd})`)
-        : "");
+      el.title = chip.path + rangeTitle;
       el.innerHTML = (chip.hidden ? ICON.eyeOff : ICON.file) +
-        `<span>${escapeHtml(range ? `${fileName}:${range}` : fileName)}</span>`;
+        `<span>${escapeHtml(label)}</span>`;
       el.onclick = () => vscode.postMessage({ type: "toggleChip", id: chip.id });
       chipsEl.appendChild(el);
     }
@@ -3842,6 +4531,7 @@
         state.cwd = msg.cwd || "";
         state.extVersion = msg.extVersion || "";
         if (typeof msg.showThinking === "boolean") state.showThinking = msg.showThinking;
+        if (typeof msg.expandCommandOutputs === "boolean") state.expandCommandOutputs = msg.expandCommandOutputs;
         applyThinkingVisibility();
         break;
       case "showThinking":
@@ -3857,6 +4547,12 @@
         // The CSS derives both `zoom` and the viewport-height compensation from
         // this one variable, so the composer stays pinned to the bottom.
         document.body.style.setProperty("--chat-zoom", String(msg.value || 1));
+        break;
+      case "focusInput":
+        // Send Selection / Send File / @-mention (#43): the host revealed the
+        // panel taking focus; land the caret in the composer so the user can
+        // type a prompt immediately.
+        input.focus();
         break;
       case "grokUpdateStatus":
         // Reply to the About panel's checkGrokUpdate. The check also reports the
@@ -4091,6 +4787,11 @@
           addSubagentCard(msg.call);
           break;
         }
+        // On session/load a background delegation's poller replays here as a
+        // single completed `tool_call` (structured TaskOutput or, cold-restored,
+        // a flattened text blob) — fold its result into the matching subagent
+        // card and drop the redundant "[subagent:…]" poller row.
+        if (maybeFinishSubagentFromTaskOutput(msg.call) || maybeFinishSubagentFromTaskText(msg.call)) break;
         addToToolGroup(msg.call);
         // On session/load a completed edit replays as a single `tool_call` that
         // already carries its diff (no follow-up update) — attach the preview here
@@ -4141,6 +4842,15 @@
             break;
           }
         }
+        // A self-executed command (cursor/Composer runs it in its own shell and
+        // reports the result here, not via terminal/create) — fill the row's #41
+        // IN/OUT box by toolCallId. Takes precedence over the generic failure path
+        // so a non-zero command reads as an [Error] exit N in its OUT box, matching
+        // grok-build's terminal-fed rows. No-op (returns false) for grok-build,
+        // whose row already has OUT.
+        if (String(msg.call?.status).toLowerCase() === "completed" && maybeAttachToolResultOutput(msg.call)) {
+          break;
+        }
         // A failed tool (e.g. `image_to_video failed: image reference not readable`)
         // — surface the reason on its row instead of silently dropping it.
         const failure = toolFailureText(msg.call);
@@ -4158,22 +4868,55 @@
         // tool_call_update lacks, and a completion backstop if the tool
         // channel's update never lands.
         const u = msg.update || {};
-        const cards = [...state.subagentCards.values()];
+        // A restore-built card CAN receive its own lifecycle when grok re-forwards
+        // the `_x.ai/session/update` rail on session/load (fills Composer's missing
+        // duration + the completion backstop). But a LATER LIVE spawn/finish must
+        // never touch it (that would stamp the new run onto the old card). So skip
+        // replayed cards only for live events — during replay they're eligible.
+        const cards = [...state.subagentCards.values()].filter(
+          (c) => state.replaying || !c.dataset.subagentReplayed,
+        );
         if (u.sessionUpdate === "subagent_spawned") {
-          // FIFO: spawn events arrive in the same order as their tool_calls.
-          // Done-ness is irrelevant — the tool channel's completion can race
-          // ahead of the lifecycle stream.
-          const el = cards.find((c) => !c.dataset.subagentId);
-          if (el) el.dataset.subagentId = String(u.subagent_id || "");
+          // Strict FIFO: spawn events arrive in tool-call order. Done-ness is
+          // deliberately IGNORED — a tool-channel completion routinely races
+          // ahead of the lifecycle spawn for the SAME card, so a done-but-untagged
+          // card must still be taggable by its own spawn. Only tag when there's a
+          // real id — an empty id would leave the card falsy-untagged and let the
+          // NEXT spawn steal it.
+          if (u.subagent_id) {
+            const el = cards.find((c) => !c.dataset.subagentId);
+            if (el) el.dataset.subagentId = String(u.subagent_id);
+          }
         } else if (u.sessionUpdate === "subagent_finished") {
-          let el = u.subagent_id
-            ? cards.find((c) => c.dataset.subagentId === String(u.subagent_id))
-            : undefined;
-          if (!el) el = cards.filter((c) => !c.classList.contains("subagent-done")).pop();
+          let el;
+          if (u.subagent_id) {
+            // With an id, ONLY an exact id match is safe — a stale/unknown id must
+            // not fall through to a cardinality guess and finish an unrelated
+            // running card.
+            el = cards.find((c) => c.dataset.subagentId === String(u.subagent_id));
+          } else {
+            // No id at all: attribute only when exactly ONE card is unfinished;
+            // otherwise a no-op beats guessing (the tool channel still completes
+            // the card).
+            const unfinished = cards.filter((c) => !c.classList.contains("subagent-done"));
+            if (unfinished.length === 1) el = unfinished[0];
+          }
           if (el) {
+            // subagent_finished carries status ("completed"|"failed"|"cancelled")
+            // + error (output omitted on failure) — render the outcome instead of
+            // a silent empty "success". A cancel is a user stop, not a failure, so
+            // it reads muted (not red). The synthesized note is markdown for
+            // renderMarkdown (italic *…*, which also re-escapes &<> — so no
+            // escapeHtml here or it double-escapes).
+            const status = String(u.status || "completed").toLowerCase();
+            const cancelled = status === "cancelled";
+            const failed = !cancelled && status !== "completed";
             finishSubagentCard(el, {
               durationMs: typeof u.duration_ms === "number" ? u.duration_ms : null,
-              output: typeof u.output === "string" ? u.output : "",
+              output: typeof u.output === "string" && u.output ? u.output
+                : (failed || cancelled) ? `*Subagent ${status}${u.error ? ": " + String(u.error) : ""}.*` : "",
+              failed,
+              cancelled,
             });
           }
         }
@@ -4215,6 +4958,9 @@
       case "planNotice":
         addPlanNotice(msg.text);
         break;
+      case "autoCompactNotice":
+        addAutoCompactNotice(msg.text);
+        break;
       case "planBlocked":
         addPlanNotice(
           msg.kind === "terminal"
@@ -4249,6 +4995,46 @@
         if (msg.window) state.contextWindow = msg.window;
         updateDonut(msg.used);
         break;
+      case "expandCommandOutputs":
+        // Live toggle (grok.expandCommandOutputs): applies to existing rows
+        // too, and sets the default for rows still to come. Clears the
+        // per-session Expand/Collapse All latch — last action wins.
+        state.expandCommandOutputs = !!msg.value;
+        state.toolExpandOverride = null;
+        applyExpandCommandOutputs();
+        if (state.gearView === "config") renderConfigDebugPanel(); // keep the switch in sync
+        break;
+      case "setAllToolDetails":
+        // Command Palette: Grok: Expand/Collapse All Tool Details — one-shot,
+        // current session only, doesn't touch the persisted expandCommandOutputs.
+        setAllToolDetails(!!msg.open);
+        break;
+      case "commandOutput": {
+        // A finished shell command's captured output (#41). grok-build delegates
+        // commands via terminal/create, so this path fires for it — attach to the
+        // oldest un-served row with the exact same command; if none matches
+        // (title-only shape / a race) render a standalone row so output is never
+        // dropped. (The cursor/Composer agent runs commands in its OWN CLI-side
+        // persistent shell and never sends terminal/create, so this never fires
+        // for it — its output arrives on the completed tool_call_update instead
+        // and is attached by toolCallId; see maybeAttachToolResultOutput. Do NOT
+        // FIFO-match here: Composer completes commands out of issue order, so any
+        // order-based guess would misattribute outputs to the wrong rows.)
+        const wanted = typeof msg.command === "string" ? msg.command.trim() : msg.command;
+        const pending = state.pendingCommandDetails.find((p) => !p.done && p.command === wanted);
+        let details = pending && pending.details;
+        if (pending) pending.done = true;
+        if (!details) {
+          addToToolGroup({ title: truncate(`Run ${msg.command}`, 120), kind: "execute", rawInput: { command: msg.command } });
+          const fallback = state.pendingCommandDetails[state.pendingCommandDetails.length - 1];
+          if (fallback && !fallback.done && fallback.command === wanted) {
+            fallback.done = true;
+            details = fallback.details;
+          }
+        }
+        if (details) attachCommandOutput(details, msg);
+        break;
+      }
       case "agentReset": {
         hidePlanProcessing(); // turn is being reset, indicator no longer applies
         hideGrokking();

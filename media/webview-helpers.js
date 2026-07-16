@@ -20,8 +20,8 @@
     "voiceError", "chips", "commandsUpdate", "userMessage", "agentStart", "thoughtChunk",
     "messageChunk", "media", "userMessageChunk", "historyReplay", "permissionHistoryQueue",
     "planHistoryQueue", "planProcessing", "toolCall", "toolCallUpdate", "permissionRequest",
-    "permissionResolved", "exitPlanRequest", "planResolved", "questionRequest", "planNotice", "planBlocked",
-    "promptComplete", "contextUsage", "agentReset", "agentError", "agentEnd", "exit", "setBusy", "summarizing",
+    "permissionResolved", "exitPlanRequest", "planResolved", "questionRequest", "planNotice", "autoCompactNotice", "planBlocked",
+    "promptComplete", "contextUsage", "commandOutput", "expandCommandOutputs", "setAllToolDetails", "focusInput", "agentReset", "agentError", "agentEnd", "exit", "setBusy", "summarizing",
     "sessionContext", "clearMessages", "onboarding", "error", "xaiNotification", "subagentUpdate", "sessions",
     "sessionDot", "queuedSends",
   ];
@@ -29,6 +29,7 @@
     "ready", "send", "newSession", "cancel", "pickModel", "setMode", "removeChip",
     "toggleChip", "openFile", "openUrl", "openDiff", "exportExpr", "setEffort",
     "openGlobalConfig", "openProjectConfig", "runMcpList", "showLogs", "setShowThinking",
+    "setExpandCommandOutputs",
     "dropFile", "permissionAnswer", "exitPlanAnswer", "questionAnswer", "questionCancel",
     "setModel", "runInstallCmd", "runGrokLogin", "logout", "checkGrokUpdate", "updateGrok",
     "recheckConnection", "listSessions", "resumeSession", "renameSession", "deleteSession",
@@ -210,6 +211,14 @@
       .replace(/<subagent_(meta|result)>[\s\S]*?<\/subagent_\1>/g, "")
       .replace(/<\/?subagent_(meta|result)>/g, "")
       .trim();
+    // Defense: if a whole poller blob (=== Task … === / Command / Status / …
+    // === Output ===) reaches here unparsed, keep only the child's words.
+    const outDivider = /^[\s\S]*?^===\s*Output\s*===\s*\n?/im;
+    if (/^===\s*Task\s+/im.test(s) && outDivider.test(s)) s = s.replace(outDivider, "").trim();
+    // A restored card's persisted body can lead with a `[subagent:<type>]` label
+    // (the live path never shows it) — strip it FIRST so a label + lead-in combo
+    // ("[subagent:x] response: …") still reaches the lead-in strips below.
+    s = s.replace(/^\[subagent:[^\]]*\]\s*/i, "");
     s = s.replace(/^this is the output of the subagent:\s*/i, "");
     s = s.replace(/^response:\s*/i, "");
     // The Agent ID hint trails AFTER </response>, so strip it before the
@@ -218,6 +227,41 @@
     const wrapped = /^<response>\s*([\s\S]*?)\s*<\/response>$/i.exec(s);
     if (wrapped) s = wrapped[1];
     return s.trim();
+  }
+
+  // A background subagent's result comes back on the `get_command_or_subagent_output`
+  // poller. Live, that's a structured `rawOutput.TaskOutput.Result`; on a cold
+  // `session/load` grok replays it FLATTENED to a text blob instead:
+  //   === Task <id> ===
+  //   Command: [subagent:<type>] <description>
+  //   Status: completed|failed|cancelled
+  //   Duration: 18.78s
+  //   === Output ===
+  //   <the child's actual words>
+  //   <subagent_meta …>/<subagent_result …>
+  // Parse that back into the same shape finishSubagentCard wants, so a restored
+  // background delegation shows its result + duration instead of a bare, dead
+  // poller row. Returns null unless the blob is genuinely a SUBAGENT task result
+  // (a backgrounded shell command polls through the same tool — leave those be).
+  function parseSubagentTaskResult(text) {
+    const s = String(text == null ? "" : text);
+    const taskM = /^===\s*Task\s+(\S+)\s*===/im.exec(s);
+    if (!taskM) return null;
+    const isSubagent = /Command:\s*\[subagent:/i.test(s) || /<subagent_(meta|result)\b/i.test(s);
+    if (!isSubagent) return null;
+    const statusM = /^\s*Status:\s*(\w+)/im.exec(s);
+    const status = statusM ? statusM[1].toLowerCase() : "completed";
+    let durationMs = null;
+    const metaMs = /duration_ms\s*=\s*(\d+)/i.exec(s);
+    const durSecs = /^\s*Duration:\s*([\d.]+)\s*s/im.exec(s);
+    if (metaMs) durationMs = parseInt(metaMs[1], 10);
+    else if (durSecs) durationMs = Math.round(parseFloat(durSecs[1]) * 1000);
+    // Everything after the "=== Output ===" divider is the child's words; the
+    // envelope trailers (<subagent_meta>/<subagent_result>) are stripped by
+    // cleanSubagentOutput downstream. No divider → nothing usable.
+    const outM = /^===\s*Output\s*===\s*\n?([\s\S]*)$/im.exec(s);
+    const output = outM ? outM[1].trim() : "";
+    return { taskId: taskM[1], status, durationMs, output, failed: status !== "completed" };
   }
 
   // Human label for a subagent card: the agent type grok delegated to
@@ -303,7 +347,98 @@
       }
     }
     if (typeof raw.error === "string" && raw.error.trim()) return raw.error.trim();
+    // Some tools put the reason under a variant-specific key rather than
+    // message/error, with no content[] blob (e.g. list_dir → rawOutput.NotFound,
+    // read_file → rawOutput.FileReadError). Mine the first stringy value —
+    // skipping the "type" discriminant — so the row shows the real error instead
+    // of the generic fallback.
+    for (const k of Object.keys(raw)) {
+      if (k === "type") continue;
+      const v = raw[k];
+      if (typeof v === "string" && v.trim()) return v.trim();
+    }
     return "Tool call failed.";
+  }
+
+  // Scannable program label for a command tool row: the executable (first token,
+  // path-stripped, de-quoted) plus one following BARE word when it isn't a flag —
+  // so `git status` / `npm test` stay distinguishable while a long `node -e "…"`
+  // payload collapses to just `node`. The full command lives in the row's IN/OUT
+  // detail. PowerShell `Verb-Noun` cmdlets survive (the hyphen is mid-token; only
+  // a LEADING -/ marks a flag). A QUOTED next token is an argument/data (an echo
+  // banner like `Write-Output '=== 1. git status ==='`), not a subcommand, so it's
+  // dropped — otherwise it drags a long quoted string into the label. Only the
+  // first statement is summarized (a ; | & or newline ends it). Always returns
+  // something → "command" fallback, so an unparseable command still reads "Run command".
+  function commandProgramLabel(command) {
+    if (typeof command !== "string") return "command";
+    let cleaned = command.trim();
+    // A `(…)` subshell is grok's navigate-then-run idiom (`(cd dir ; cmd)`, the
+    // POSIX form it emits even against a PowerShell host): strip the wrapping
+    // parens and skip a leading `cd <dir>` prelude so the label names the command
+    // that does the work, not the `(cd` plumbing. Outside a subshell the first
+    // statement is used verbatim — a user-typed `cd src && npm test` keeps its `cd`.
+    const subshell = cleaned.startsWith("(");
+    if (subshell) cleaned = cleaned.replace(/^\(+\s*/, "").replace(/\s*\)+$/, "");
+    const statements = cleaned.split(/\s*(?:&&|\|\||;|\||&|\n)\s*/).map((s) => s.trim()).filter(Boolean);
+    const stmt = (subshell ? statements.find((s) => !/^cd(\s|$)/.test(s)) : undefined) || statements[0] || "";
+    if (!stmt) return "command";
+    // Tokenize, tracking whether each token was quoted (Windows paths / banners).
+    const tokens = [];
+    const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+    let m;
+    while ((m = re.exec(stmt)) !== null) {
+      tokens.push({ text: m[1] ?? m[2] ?? m[3], quoted: m[1] !== undefined || m[2] !== undefined });
+    }
+    let i = 0;
+    while (i < tokens.length && /^[A-Za-z_]\w*=/.test(tokens[i].text)) i++; // skip FOO=bar env prefixes
+    const rawProg = tokens[i] && tokens[i].text;
+    if (!rawProg) return "command";
+    const prog = rawProg.split(/[\\/]/).pop() || rawProg; // basename
+    const nextTok = tokens[i + 1];
+    // Append the next token only when it's a bare, non-flag word — a real
+    // subcommand (`git status`), never a quoted argument value, a flag, or a
+    // path/filename argument (`node research/x.cjs` → "node", not the script path).
+    const next =
+      nextTok && !nextTok.quoted && !/^[-/]/.test(nextTok.text) && !/[\\/]/.test(nextTok.text)
+        ? nextTok.text
+        : null;
+    const label = next ? `${prog} ${next}` : prog;
+    return label.length > 30 ? label.slice(0, 29) + "…" : label;
+  }
+
+  // Pull a self-executed shell command's result off a completed `tool_call_update`.
+  // The cursor/Composer agent runs commands in its OWN CLI-side persistent shell
+  // and reports the result on the completed update (keyed by `toolCallId`) instead
+  // of delegating via `terminal/create` — so the #41 IN/OUT box, fed only by the
+  // terminal `commandOutput` path, never gets output for those rows. Recover the
+  // output + exit code here so the box can render it, matched reliably by
+  // `toolCallId` (Composer completes commands OUT of issue order, so no order-based
+  // guess is safe). Returns `{output, exitCode, truncated}` or null when the update
+  // carries no command result. Pure.
+  function extractToolResultOutput(call) {
+    if (!call || typeof call !== "object") return null;
+    const ro = call.rawOutput;
+    // Output text: the decoded `content` text is cleanest; else decode rawOutput.output
+    // (a byte array on the wire), else a plain string.
+    let output = "";
+    if (Array.isArray(call.content)) {
+      const c = call.content.find((b) => b && b.content && typeof b.content.text === "string");
+      if (c) output = c.content.text;
+    }
+    if (!output && ro) {
+      if (typeof ro.output === "string") output = ro.output;
+      else if (Array.isArray(ro.output)) {
+        try { output = new TextDecoder().decode(Uint8Array.from(ro.output)); } catch { output = ""; }
+      }
+    }
+    // grok reports the exit code as snake_case `exit_code`; tolerate camelCase too.
+    const exitCode =
+      ro && typeof ro.exit_code === "number" ? ro.exit_code
+      : ro && typeof ro.exitCode === "number" ? ro.exitCode
+      : null;
+    if (!output && exitCode == null) return null; // nothing to show
+    return { output, exitCode, truncated: !!(ro && ro.truncated) };
   }
 
   // Parse the <vscode-context> envelope that prompt-builder.ts wraps around the
@@ -435,7 +570,70 @@
     return { body: rest.trim(), images: [...leading, ...trailing] };
   }
 
-  const api = { FILE_EXTS, HOST_MESSAGE_TYPES, WEBVIEW_MESSAGE_TYPES, isKnownHostMessage, looksLikeFileRef, formatRelativeTime, modelDisplayName, MIC_STATES, nextMicState, trailingSendPhrase, buildQuestionAnswers, isSubagentToolCall, subagentLabel, cleanSubagentOutput, shouldStickToBottom, splitMath, stripUnsupportedTex, toolFailureText, parseAttachmentContext, parseSelectionBlocks, parseImageTags };
+  // Line-level diff between two text regions, for rendering an edit's change
+  // INLINE in the chat. grok sends the *replaced region* (search_replace's
+  // old_string/new_string) as `oldText`/`newText`, NOT a computed diff — so we
+  // compute one here (LCS backtrack), which also yields the honest `+added
+  // −removed` line counts. Returns { lines: [{type:'ctx'|'add'|'del', text}],
+  // added, removed, truncated }.
+  //   - CRLF is normalized for BOTH comparison and display (a stray `\r` on
+  //     native-Windows grok would otherwise make identical lines miscompare into
+  //     phantom ±N across the whole region).
+  //   - An empty region is ZERO lines, not one blank line — so a new-file create
+  //     (oldText:"") reads as pure additions, not "−1".
+  //   - Pathological huge regions skip the O(m·n) table and fall back to a flat
+  //     replace (all-del then all-add), flagged `truncated`, so the UI never hangs.
+  function computeLineDiff(oldText, newText, opts) {
+    const maxProduct = (opts && opts.maxProduct) || 4000000; // ~2000×2000 line cap
+    const norm = (t) => (t == null ? "" : String(t).replace(/\r\n?/g, "\n"));
+    const o = norm(oldText);
+    const n = norm(newText);
+    const oldLines = o === "" ? [] : o.split("\n");
+    const newLines = n === "" ? [] : n.split("\n");
+    const m = oldLines.length;
+    const k = newLines.length;
+    if (m * k > maxProduct) {
+      const lines = [];
+      for (const t of oldLines) lines.push({ type: "del", text: t });
+      for (const t of newLines) lines.push({ type: "add", text: t });
+      return { lines, added: k, removed: m, truncated: true };
+    }
+    // LCS length table, filled from the bottom-right so a forward backtrack emits
+    // lines in source order.
+    const dp = [];
+    for (let i = 0; i <= m; i++) dp.push(new Int32Array(k + 1));
+    for (let i = m - 1; i >= 0; i--) {
+      const row = dp[i];
+      const next = dp[i + 1];
+      for (let j = k - 1; j >= 0; j--) {
+        row[j] = oldLines[i] === newLines[j]
+          ? next[j + 1] + 1
+          : (next[j] >= row[j + 1] ? next[j] : row[j + 1]);
+      }
+    }
+    const lines = [];
+    let added = 0;
+    let removed = 0;
+    let i = 0;
+    let j = 0;
+    while (i < m && j < k) {
+      if (oldLines[i] === newLines[j]) {
+        lines.push({ type: "ctx", text: oldLines[i] });
+        i++; j++;
+      } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+        lines.push({ type: "del", text: oldLines[i] });
+        removed++; i++;
+      } else {
+        lines.push({ type: "add", text: newLines[j] });
+        added++; j++;
+      }
+    }
+    while (i < m) { lines.push({ type: "del", text: oldLines[i] }); removed++; i++; }
+    while (j < k) { lines.push({ type: "add", text: newLines[j] }); added++; j++; }
+    return { lines, added, removed, truncated: false };
+  }
+
+  const api = { FILE_EXTS, HOST_MESSAGE_TYPES, WEBVIEW_MESSAGE_TYPES, isKnownHostMessage, looksLikeFileRef, formatRelativeTime, modelDisplayName, MIC_STATES, nextMicState, trailingSendPhrase, buildQuestionAnswers, isSubagentToolCall, subagentLabel, cleanSubagentOutput, parseSubagentTaskResult, shouldStickToBottom, splitMath, stripUnsupportedTex, toolFailureText, commandProgramLabel, extractToolResultOutput, computeLineDiff, parseAttachmentContext, parseSelectionBlocks, parseImageTags };
 
   if (typeof module !== "undefined" && module.exports) {
     module.exports = api;

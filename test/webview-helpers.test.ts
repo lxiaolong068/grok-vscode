@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 // @ts-expect-error — plain JS module, no types
-import { looksLikeFileRef, formatRelativeTime, FILE_EXTS, modelDisplayName, nextMicState, trailingSendPhrase, buildQuestionAnswers, isSubagentToolCall, subagentLabel, cleanSubagentOutput, shouldStickToBottom, splitMath, stripUnsupportedTex, parseAttachmentContext, parseSelectionBlocks, parseImageTags } from "../media/webview-helpers.js";
+import { looksLikeFileRef, formatRelativeTime, FILE_EXTS, modelDisplayName, nextMicState, trailingSendPhrase, buildQuestionAnswers, isSubagentToolCall, subagentLabel, cleanSubagentOutput, parseSubagentTaskResult, shouldStickToBottom, splitMath, stripUnsupportedTex, parseAttachmentContext, parseSelectionBlocks, parseImageTags, toolFailureText, commandProgramLabel, extractToolResultOutput, computeLineDiff } from "../media/webview-helpers.js";
 import { buildPrompt, buildPromptWithImages } from "../src/prompt-builder";
 import { makeExplicitChip, makeImplicitChip, makeImageChip } from "../src/chips";
 
@@ -561,6 +561,23 @@ describe("cleanSubagentOutput", () => {
     expect(cleanSubagentOutput(truncated)).toBe(truncated);
   });
 
+  it("strips a leading [subagent:<type>] label (shown only on restore)", () => {
+    expect(cleanSubagentOutput("[subagent:general-purpose] Counted 3 lines.")).toBe("Counted 3 lines.");
+    expect(cleanSubagentOutput("[subagent:explore]  found it")).toBe("found it");
+    // …but a mid-answer occurrence is left alone (leading-anchored).
+    const mid = "See [subagent:general-purpose] for the sub-run.";
+    expect(cleanSubagentOutput(mid)).toBe(mid);
+  });
+
+  it("strips the label BEFORE the lead-in (a label + 'response:' combo)", () => {
+    expect(cleanSubagentOutput("[subagent:explore] response: the answer")).toBe("the answer");
+  });
+
+  it("as defense, keeps only the child's words if a whole poller blob leaks in", () => {
+    const blob = "=== Task 019f6a ===\nCommand: [subagent:general-purpose] Do it\nStatus: completed\nDuration: 2.0s\n\n=== Output ===\nAll done.";
+    expect(cleanSubagentOutput(blob)).toBe("All done.");
+  });
+
   it("handles null/empty", () => {
     expect(cleanSubagentOutput(null)).toBe("");
     expect(cleanSubagentOutput("")).toBe("");
@@ -589,6 +606,60 @@ describe("cleanSubagentOutput", () => {
     // this is the shape grok used in the real session that prompted the fix.
     expect(isSubagentToolCall({ title: "run_terminal_command", rawInput: { variant: "Bash", command: "git status", is_background: false } })).toBe(false);
     expect(isSubagentToolCall({ title: "run_terminal_command", rawInput: { variant: "Bash", command: "git status" } })).toBe(false);
+  });
+});
+
+describe("parseSubagentTaskResult (restore folds a background delegation's poller blob into its card)", () => {
+  // The exact flattened shape grok replays on session/load (real capture).
+  const BLOB = [
+    "=== Task 019f6aa8-d3dc-70d2-bfac-785e0e5f3e03 ===",
+    "Command: [subagent:general-purpose] Quick subagent smoke test",
+    "Status: completed",
+    "Started: 2026-07-16T11:21:17Z",
+    "Ended: 2026-07-16T11:21:35Z",
+    "Duration: 18.78s",
+    "Exit Code: 0",
+    "Output File: ",
+    "",
+    "=== Output ===",
+    "Subagent smoke test ran successfully.",
+    "",
+    "<subagent_meta>id=019f6aa8, type=general-purpose, tool_calls=1, turns=1, duration_ms=18778</subagent_meta>",
+  ].join("\n");
+
+  it("parses task id, status, duration (prefers duration_ms), and the output section", () => {
+    const r = parseSubagentTaskResult(BLOB)!;
+    expect(r.taskId).toBe("019f6aa8-d3dc-70d2-bfac-785e0e5f3e03");
+    expect(r.status).toBe("completed");
+    expect(r.durationMs).toBe(18778); // <subagent_meta> duration_ms wins over "18.78s"
+    expect(r.failed).toBe(false);
+    expect(r.output).toContain("Subagent smoke test ran successfully.");
+    expect(cleanSubagentOutput(r.output)).toBe("Subagent smoke test ran successfully.");
+  });
+
+  it("falls back to the Duration: Ns line when no meta duration_ms is present", () => {
+    const noMeta = "=== Task t9 ===\nCommand: [subagent:explore] look\nStatus: completed\nDuration: 3.4s\n\n=== Output ===\ndone";
+    expect(parseSubagentTaskResult(noMeta)!.durationMs).toBe(3400);
+  });
+
+  it("flags a failed / cancelled task from its Status line", () => {
+    const failed = "=== Task t1 ===\nCommand: [subagent:general-purpose] x\nStatus: failed\n\n=== Output ===\nboom";
+    expect(parseSubagentTaskResult(failed)!.failed).toBe(true);
+    const cancelled = "=== Task t2 ===\nCommand: [subagent:general-purpose] x\nStatus: cancelled\n\n=== Output ===\n";
+    expect(parseSubagentTaskResult(cancelled)!.status).toBe("cancelled");
+  });
+
+  it("returns null for a backgrounded shell COMMAND poll (same tool, not a subagent)", () => {
+    // get_command_or_subagent_output also polls plain background commands — those
+    // must stay as a normal tool row, so no subagent marker => null.
+    const cmd = "=== Task t3 ===\nCommand: node build.js\nStatus: completed\n\n=== Output ===\nBuilt OK";
+    expect(parseSubagentTaskResult(cmd)).toBeNull();
+  });
+
+  it("returns null when the blob isn't a task-output envelope at all", () => {
+    expect(parseSubagentTaskResult("just some agent prose")).toBeNull();
+    expect(parseSubagentTaskResult("")).toBeNull();
+    expect(parseSubagentTaskResult(null as any)).toBeNull();
   });
 });
 
@@ -737,5 +808,242 @@ describe("stripUnsupportedTex", () => {
   it("coerces null/undefined to an empty string", () => {
     expect(stripUnsupportedTex(null)).toBe("");
     expect(stripUnsupportedTex(undefined)).toBe("");
+  });
+});
+
+describe("toolFailureText", () => {
+  it("returns null for a non-failed call", () => {
+    expect(toolFailureText({ status: "completed" })).toBe(null);
+    expect(toolFailureText({ status: "in_progress" })).toBe(null);
+    expect(toolFailureText(null)).toBe(null);
+  });
+
+  it("prefers rawOutput.message", () => {
+    expect(
+      toolFailureText({ status: "failed", rawOutput: { message: "boom" } }),
+    ).toBe("boom");
+  });
+
+  it("falls back to a content[].content.text blob", () => {
+    expect(
+      toolFailureText({
+        status: "failed",
+        content: [{ type: "content", content: { type: "text", text: "no such file" } }],
+      }),
+    ).toBe("no such file");
+  });
+
+  it("mines a variant-specific rawOutput key when there is no message/content (list_dir NotFound)", () => {
+    // Real wire shape from a failed list_dir on a missing directory — the error
+    // lives only under rawOutput.NotFound, which the generic fallback used to hide.
+    expect(
+      toolFailureText({
+        status: "failed",
+        rawOutput: { type: "ListDir", NotFound: "Error: c:\\x\\fkjgk does not exist." },
+      }),
+    ).toBe("Error: c:\\x\\fkjgk does not exist.");
+  });
+
+  it("mines rawOutput.FileReadError as the variant key too", () => {
+    expect(
+      toolFailureText({
+        status: "failed",
+        rawOutput: { type: "FileRead", FileReadError: "Cannot read binary file: x.png" },
+      }),
+    ).toBe("Cannot read binary file: x.png");
+  });
+
+  it("skips the 'type' discriminant and non-string variant values", () => {
+    expect(
+      toolFailureText({ status: "failed", rawOutput: { type: "Whatever", count: 3, note: "the reason" } }),
+    ).toBe("the reason");
+  });
+
+  it("returns the generic fallback when nothing stringy is present", () => {
+    expect(toolFailureText({ status: "failed", rawOutput: { type: "X" } })).toBe("Tool call failed.");
+    expect(toolFailureText({ status: "error" })).toBe("Tool call failed.");
+  });
+});
+
+describe("commandProgramLabel", () => {
+  it("keeps a non-flag subcommand", () => {
+    expect(commandProgramLabel("git status")).toBe("git status");
+    expect(commandProgramLabel("git status --short")).toBe("git status");
+    expect(commandProgramLabel("npm test")).toBe("npm test");
+    expect(commandProgramLabel("node build.js")).toBe("node build.js");
+  });
+
+  it("drops a flag or payload, leaving just the program", () => {
+    expect(commandProgramLabel('node -e "console.log(1)"')).toBe("node");
+    expect(commandProgramLabel("ls -la /tmp")).toBe("ls");
+    expect(commandProgramLabel("dir /s /b foo")).toBe("dir"); // Windows /-flags
+  });
+
+  it("summarizes only the first statement (stops at ; | && || &)", () => {
+    expect(commandProgramLabel('Get-Date; Write-Output "done"')).toBe("Get-Date");
+    expect(commandProgramLabel("cat foo | grep bar")).toBe("cat foo");
+    expect(commandProgramLabel("cd src && npm test")).toBe("cd src");
+  });
+
+  it("handles PowerShell Verb-Noun cmdlets (leading dash only marks a flag)", () => {
+    expect(commandProgramLabel("Get-ChildItem -Path . -Recurse")).toBe("Get-ChildItem");
+    expect(commandProgramLabel("Get-Date")).toBe("Get-Date");
+  });
+
+  it("drops a QUOTED next token (an argument/banner, not a subcommand)", () => {
+    // A quoted arg is data — dragging it in makes the label a long truncated slab
+    // (the reported "Run Write-Output === 1. git statu…"). Just show the program.
+    expect(commandProgramLabel('Write-Output "hello"')).toBe("Write-Output");
+    expect(commandProgramLabel("Write-Output '=== 1. git status ==='; git status")).toBe("Write-Output");
+    expect(commandProgramLabel('Set-Location "c:\\GitHub\\a b"; git status')).toBe("Set-Location");
+    expect(commandProgramLabel("echo 'a long banner message here'")).toBe("echo");
+    // …but a bare next word (a real subcommand) is still kept.
+    expect(commandProgramLabel("git commit -m x")).toBe("git commit");
+  });
+
+  it("path-strips the executable and de-quotes a spaced path", () => {
+    expect(commandProgramLabel("/usr/bin/node script.js")).toBe("node script.js");
+    expect(commandProgramLabel('"C:\\Program Files\\tool.exe" run')).toBe("tool.exe run");
+  });
+
+  it("skips leading FOO=bar env assignments", () => {
+    expect(commandProgramLabel("DEBUG=1 node app.js")).toBe("node app.js");
+  });
+
+  it("strips a `(cd dir ; cmd)` subshell and skips the cd prelude (grok's navigate-then-run idiom)", () => {
+    // The reported "Run (cd" — should name the command that does the work, not the
+    // `(cd` plumbing. This POSIX subshell is what grok emits even against PowerShell.
+    expect(commandProgramLabel('(cd "c:\\GitHub\\grok-build-vscode" ; node research/auto-compact-probe.cjs)')).toBe("node");
+    expect(commandProgramLabel("(cd dir ; git status)")).toBe("git status");
+    expect(commandProgramLabel("(cd a && cd b && node build.js)")).toBe("node build.js");
+    expect(commandProgramLabel("(npm test)")).toBe("npm test"); // subshell, no cd prelude
+    expect(commandProgramLabel("(cd foo)")).toBe("cd foo"); // a lone cd still shows cd
+  });
+
+  it("only reinterprets cd inside a () subshell — a user-typed cd chain is left alone", () => {
+    expect(commandProgramLabel("cd src && npm test")).toBe("cd src"); // unchanged (regression guard)
+  });
+
+  it("does not append a path/filename argument as if it were a subcommand", () => {
+    // A token containing a path separator is an argument, not a `git status`-style verb.
+    expect(commandProgramLabel("node research/auto-compact-probe.cjs")).toBe("node");
+    expect(commandProgramLabel("python scripts/run.py")).toBe("python");
+    // …but a bare filename with no path separator is still kept (unchanged).
+    expect(commandProgramLabel("node build.js")).toBe("node build.js");
+  });
+
+  it("caps very long labels", () => {
+    const out = commandProgramLabel("someverylongprogramname anotherverylongsubcommandword extra");
+    expect(out.length).toBeLessThanOrEqual(30);
+    expect(out.endsWith("…")).toBe(true);
+  });
+
+  it("falls back to 'command' for empty / unparseable input", () => {
+    expect(commandProgramLabel("")).toBe("command");
+    expect(commandProgramLabel("   ")).toBe("command");
+    expect(commandProgramLabel(null as unknown as string)).toBe("command");
+    expect(commandProgramLabel("FOO=bar")).toBe("command"); // only an env assignment, no program
+  });
+});
+
+describe("extractToolResultOutput (cursor/Composer self-executed command result)", () => {
+  it("reads the decoded content text + exit code", () => {
+    const r = extractToolResultOutput({
+      rawOutput: { type: "Bash", output: [1, 2, 3], exit_code: 0, truncated: false },
+      content: [{ type: "content", content: { type: "text", text: "v20.19.0\n10.8.2" } }],
+    });
+    expect(r).toEqual({ output: "v20.19.0\n10.8.2", exitCode: 0, truncated: false });
+  });
+
+  it("decodes rawOutput.output bytes when there's no content text", () => {
+    const bytes = [...Buffer.from("hi ✓", "utf8")]; // multibyte survives TextDecoder
+    const r = extractToolResultOutput({ rawOutput: { type: "Bash", output: bytes, exit_code: 0 } });
+    expect(r!.output).toBe("hi ✓");
+  });
+
+  it("carries a non-zero exit code (for the [Error] marker)", () => {
+    const r = extractToolResultOutput({
+      rawOutput: { type: "Bash", exit_code: 1, truncated: true },
+      content: [{ type: "content", content: { type: "text", text: "boom" } }],
+    });
+    expect(r).toEqual({ output: "boom", exitCode: 1, truncated: true });
+  });
+
+  it("returns null when there's no command result to show", () => {
+    expect(extractToolResultOutput(null as unknown as object)).toBeNull();
+    expect(extractToolResultOutput({})).toBeNull();
+    expect(extractToolResultOutput({ rawOutput: {} })).toBeNull(); // no output, no exit code
+  });
+});
+
+describe("computeLineDiff", () => {
+  const types = (r: { lines: { type: string; text: string }[] }) => r.lines.map((l) => l.type + ":" + l.text);
+
+  it("a one-line word change is one del + one add", () => {
+    const r = computeLineDiff("alpha", "beta");
+    expect(r.added).toBe(1);
+    expect(r.removed).toBe(1);
+    expect(types(r)).toEqual(["del:alpha", "add:beta"]);
+  });
+
+  it("keeps unchanged lines as context and counts only the real change", () => {
+    // "a\nb" -> "a\nB\nc": 'a' is context, 'b' removed, 'B' and 'c' added.
+    const r = computeLineDiff("a\nb", "a\nB\nc");
+    expect(r.added).toBe(2);
+    expect(r.removed).toBe(1);
+    expect(types(r)).toEqual(["ctx:a", "del:b", "add:B", "add:c"]);
+  });
+
+  it("a new file (empty oldText) is pure additions, never a phantom -1", () => {
+    const r = computeLineDiff("", "line1\nline2");
+    expect(r.removed).toBe(0);
+    expect(r.added).toBe(2);
+    expect(types(r)).toEqual(["add:line1", "add:line2"]);
+  });
+
+  it("a full deletion (empty newText) is pure removals", () => {
+    const r = computeLineDiff("x\ny", "");
+    expect(r.added).toBe(0);
+    expect(r.removed).toBe(2);
+    expect(types(r)).toEqual(["del:x", "del:y"]);
+  });
+
+  it("normalizes CRLF so a \\r\\n region does not fabricate changes", () => {
+    // Identical content, only line endings differ → zero changes.
+    const r = computeLineDiff("a\r\nb\r\n", "a\nb\n");
+    expect(r.added).toBe(0);
+    expect(r.removed).toBe(0);
+    expect(r.lines.every((l) => l.type === "ctx")).toBe(true);
+    // And no stray \r survives into the rendered text.
+    expect(r.lines.some((l) => /\r/.test(l.text))).toBe(false);
+  });
+
+  it("identical text yields no additions or removals", () => {
+    const r = computeLineDiff("same\ntext", "same\ntext");
+    expect(r.added).toBe(0);
+    expect(r.removed).toBe(0);
+  });
+
+  it("an inserted line in the middle is a single addition", () => {
+    const r = computeLineDiff("a\nc", "a\nb\nc");
+    expect(r.added).toBe(1);
+    expect(r.removed).toBe(0);
+    expect(types(r)).toEqual(["ctx:a", "add:b", "ctx:c"]);
+  });
+
+  it("both empty is an empty diff", () => {
+    const r = computeLineDiff("", "");
+    expect(r.lines).toEqual([]);
+    expect(r.added).toBe(0);
+    expect(r.removed).toBe(0);
+  });
+
+  it("falls back to a flat replace (flagged truncated) past the size cap", () => {
+    const big = Array.from({ length: 40 }, (_, i) => "l" + i).join("\n");
+    const big2 = Array.from({ length: 40 }, (_, i) => "m" + i).join("\n");
+    const r = computeLineDiff(big, big2, { maxProduct: 100 }); // 40*40=1600 > 100
+    expect(r.truncated).toBe(true);
+    expect(r.removed).toBe(40);
+    expect(r.added).toBe(40);
   });
 });

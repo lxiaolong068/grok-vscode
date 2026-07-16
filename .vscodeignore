@@ -17,6 +17,7 @@ node_modules/**
 **/*.ts
 !out/**/*.js
 grok-session-preview.html
+terminals/**
 dist/**
 esbuild.js
 *.vsix

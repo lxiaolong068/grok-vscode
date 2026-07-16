@@ -1,47 +1,18 @@
 # Privacy
 
-**Privacy by design.** This extension is built so that it *cannot* learn anything about you or your code. The only data it sends is an anonymous count of usage, with no content and no personal identity attached — and you can turn even that off.
+**Privacy by design.** This fork sends **no background telemetry** about you, your code, or extension usage. The upstream Aptabase sender remains in the source for compatibility/testing, but its production call is disabled. Data leaves your machine only when you deliberately use a network-backed feature such as Grok/Direct API chat or voice input.
 
-## What is sent
+## Telemetry
 
-A single, anonymous **`session_start`** event ([Aptabase](https://aptabase.com)), fired on the **first real message** of a session — never the hidden plan-mode primer, and never empty or abandoned sessions. Its only purpose is to gauge how many people use the extension and which models/modes are popular.
+**No telemetry event is currently sent by this fork.** In particular, the upstream anonymous `session_start` Aptabase POST is disconnected in `src/sidebar.ts`.
 
-The event carries:
+The `grok.telemetry.enabled` setting is retained so existing user/workspace configuration stays compatible if this fork later introduces its own telemetry project. At present, changing it has no network effect.
 
-| Field | Example | Why |
-|---|---|---|
-| Anonymous **install id** | a random GUID generated once on your machine | count distinct installs — **not** your account, email, or grok login |
-| **mode / model / effort** | `agent` / `grok-build` / `high` | which features are used |
-| **OS** + extension **version** | `Windows` / `1.4.25` | platform/version split |
-| **Country** | derived by Aptabase from your IP | rough geography |
+## Voice input (Speech-to-Text)
 
-Country is the only thing derived from your IP, and the **IP itself is discarded — never stored**.
+**Voice input** sends data to xAI only when you use it. It is **opt-in per use** — nothing is captured until you click the microphone button. While you dictate, two things go to **xAI's Speech-to-Text endpoint** (`api.x.ai/v1/stt`) to produce the transcript:
 
-## What is never sent
+- your **audio** (the recording, streamed live or as a clip), and
+- an **STT credential** — the dedicated key you configured (`grok.voiceApiKey` / `GROK_VOICE_API_KEY` / `XAI_API_KEY`) if set, otherwise the token from your `grok login` (`~/.grok/auth.json`), reused so voice works without a separate key.
 
-- **No message content** — nothing you type, and nothing grok replies.
-- **No code** — not a single line, ever.
-- **No file names or paths**, no workspace name, no repo/branch.
-- **No personal identity** — no account, email, grok login, machine name, or any way to tie the install id back to you.
-
-There is no SDK and no third-party tracker — just one small, dependency-free HTTPS POST that is fire-and-forget (it can never slow down, surface to, or break a turn).
-
-## How it's gated
-
-Telemetry sends **only when both** of these are on:
-
-1. VS Code's global telemetry setting — `telemetry.telemetryLevel` (anything other than `off`), and
-2. the extension's own `grok.telemetry.enabled` (default `true`).
-
-Either one set to off stops **all** sending.
-
-> **Note on Aptabase build modes.** Events from a published/installed build report as **Release**; events from a development host (running the extension from source) report as **Debug**. In the Aptabase dashboard these are two separate streams toggled by the Bug/Rocket icon — Release data won't appear while the dashboard is in Debug view, and vice-versa.
-
-## How to opt out
-
-Do **either** of the following:
-
-- Set `grok.telemetry.enabled` to `false` in VS Code settings, **or**
-- Disable VS Code's global telemetry: set `telemetry.telemetryLevel` to `off`.
-
-Either change takes effect immediately — no reload needed.
+This is core functionality you trigger deliberately, and it goes to xAI (the same provider behind the CLI) — never to us or any third party. If you never use voice, none of this happens. To avoid sending your login token specifically, set a dedicated `grok.voiceApiKey`. Setup + details: [docs/voice-setup.md](voice-setup.md).

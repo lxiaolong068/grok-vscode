@@ -49,7 +49,7 @@ export interface PlanHistoryItem {
 
 /** host -> webview */
 export type HostMsg =
-  | { type: "initialState"; effort: string; cwd: string; useCtrlEnter: boolean; extVersion: string; showThinking: boolean }
+  | { type: "initialState"; effort: string; cwd: string; useCtrlEnter: boolean; extVersion: string; showThinking: boolean; expandCommandOutputs: boolean }
   | { type: "showThinking"; value: boolean }
   | { type: "fontScale"; value: number }
   | { type: "grokUpdateStatus"; current?: string | null; latest?: string | null; updateAvailable?: boolean; policy?: unknown; error?: string }
@@ -89,6 +89,7 @@ export type HostMsg =
   | { type: "planResolved"; requestId: number | string; verdict: "approved" | "abandoned" | "rejected" }
   | { type: "questionRequest"; req: QuestionRequest }
   | { type: "planNotice"; text: string }
+  | { type: "autoCompactNotice"; text: string }
   | { type: "planBlocked"; kind: string; target: string }
   | { type: "promptComplete"; meta: PromptResultMeta }
   // Context size read from grok's on-disk signals.json — the source that has a
@@ -110,6 +111,20 @@ export type HostMsg =
   // subagent_finished — duration/output stats the Composer agent's completed
   // tool_call_update lacks, and a completion backstop for the card.
   | { type: "subagentUpdate"; update?: unknown }
+  // A finished shell command's full text + captured output (#41) — snapshotted
+  // host-side at terminal/release (the extension runs the commands, so the
+  // buffer is exactly what grok received). exitCode null = killed/cancelled.
+  | { type: "commandOutput"; command: string; output: string; exitCode: number | null; truncated: boolean }
+  // grok.expandCommandOutputs — pre-expand every command's IN/OUT detail.
+  | { type: "expandCommandOutputs"; value: boolean }
+  // On-demand audit: expand (open:true) / collapse (open:false) EVERY tool group
+  // and command IN/OUT box in the focused session at once. Ephemeral (not
+  // persisted) — the Command Palette "Grok: Expand/Collapse All Tool Details".
+  | { type: "setAllToolDetails"; open: boolean }
+  // Move keyboard focus into the composer input (#43) — posted after Send
+  // Selection / Send File / @-mention so the user can type a prompt right away.
+  // Ephemeral UI action, not session-scoped (goes via `post`, never buffered).
+  | { type: "focusInput" }
   // nextOffset = the index offset the next load-more should request — ids CONSUMED
   // from the on-disk index, not entries shown (hidden subagent sessions occupy
   // slots without producing rows).
@@ -139,6 +154,7 @@ export type WebviewMsg =
   | { type: "runMcpList" }
   | { type: "showLogs" }
   | { type: "setShowThinking"; value: boolean }
+  | { type: "setExpandCommandOutputs"; value: boolean }
   | { type: "dropFile"; path: string; shift: boolean }
   | { type: "permissionAnswer"; requestId: number | string; optionId: string }
   | { type: "exitPlanAnswer"; requestId: number | string; verdict: "approved" | "abandoned" | "rejected"; comment?: string }
@@ -180,10 +196,11 @@ const HOST_MESSAGE_TYPE_MAP: Record<HostMsg["type"], true> = {
   historyReplay: true, permissionHistoryQueue: true, planHistoryQueue: true,
   planProcessing: true, toolCall: true, toolCallUpdate: true, permissionRequest: true,
   permissionResolved: true, exitPlanRequest: true, planResolved: true, questionRequest: true,
-  planNotice: true, planBlocked: true, promptComplete: true, contextUsage: true, agentReset: true,
+  planNotice: true, autoCompactNotice: true, planBlocked: true, promptComplete: true, contextUsage: true, agentReset: true,
   agentError: true, agentEnd: true, exit: true, setBusy: true, summarizing: true,
   sessionContext: true, clearMessages: true, onboarding: true, error: true,
-  xaiNotification: true, subagentUpdate: true, sessions: true, sessionDot: true, queuedSends: true,
+  xaiNotification: true, subagentUpdate: true, commandOutput: true, expandCommandOutputs: true,
+  setAllToolDetails: true, focusInput: true, sessions: true, sessionDot: true, queuedSends: true,
 };
 
 const WEBVIEW_MESSAGE_TYPE_MAP: Record<WebviewMsg["type"], true> = {
@@ -191,6 +208,7 @@ const WEBVIEW_MESSAGE_TYPE_MAP: Record<WebviewMsg["type"], true> = {
   setMode: true, removeChip: true, toggleChip: true, openFile: true, openUrl: true,
   openDiff: true, exportExpr: true, setEffort: true, openGlobalConfig: true,
   openProjectConfig: true, runMcpList: true, showLogs: true, setShowThinking: true,
+  setExpandCommandOutputs: true,
   dropFile: true, permissionAnswer: true, exitPlanAnswer: true, questionAnswer: true,
   questionCancel: true, setModel: true, runInstallCmd: true, runGrokLogin: true,
   logout: true, checkGrokUpdate: true, updateGrok: true, recheckConnection: true,

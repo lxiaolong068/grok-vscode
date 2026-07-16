@@ -4,7 +4,7 @@ VS Code sidebar extension for **xAI's Grok Build CLI**, driven by `grok agent st
 
 ## Status
 
-See [CHANGELOG.md](CHANGELOG.md) for the current version and full release history (the Marketplace/GitHub-published build can lag the local working tree). The whole test suite is **grok-free** — CI never spawns the binary; grok-dependent probes live separately in `research/*.cjs`. Plan mode is **enabled** and enforced client-side (see `research/plan-mode.md` § Resolution). Smoke-tested end-to-end on Linux, Windows-via-WSL, and the **native Windows build** (`irm https://x.ai/cli/install.ps1 | iex`) — `cli-locator` resolves `grok.cmd`/`grok.exe` and `terminal-manager` uses `shell:true`.
+See [CHANGELOG.md](CHANGELOG.md) for the current version and full release history (the Marketplace/GitHub-published build can lag the local working tree). The whole test suite is **grok-free** — CI never spawns the binary; grok-dependent probes live separately in `research/*.cjs`. Plan mode is **enabled** and enforced client-side (see `research/plan-mode.md` § Resolution). Smoke-tested end-to-end on Linux, Windows-via-WSL, and the **native Windows build** (`irm https://x.ai/cli/install.ps1 | iex`) — `cli-locator` resolves `grok.cmd`/`grok.exe` and `terminal-manager` selects PowerShell (or the configured cmd fallback) on Windows and `/bin/sh` elsewhere.
 
 This file is the project map: it describes the **current** architecture, not a per-version log. The full release history lives in [CHANGELOG.md](CHANGELOG.md); feature internals are documented in the dedicated sections below (§ Module map, § Session pool, § History pagination, § ACP surfaces implemented) and in `research/*`.
 
@@ -21,7 +21,7 @@ This file is the project map: it describes the **current** architecture, not a p
 | `src/session.ts` | Per-session state bag (`Session`) — one per live `grok agent stdio` process; the sidebar holds a *pool* of these + one `focused` |
 | `src/session-pool.ts` | Pure reaping policy (`selectReapable`) — idle-TTL + LRU cap over the live-session pool (never the focused/working/needs-you) |
 | `src/cli-locator.ts` | Locate `grok` binary (configured path → `~/.grok/bin/grok` → PATH); cross-platform |
-| `src/terminal-manager.ts` | Headless shell children for the agent's `terminal/*` ACP calls; cross-platform via `shell:true` |
+| `src/terminal-manager.ts` | Headless shell children for the agent's `terminal/*` ACP calls; PowerShell/cmd selection on Windows, `/bin/sh` elsewhere |
 | `src/chips.ts` | File-chip CRUD (pure) |
 | `src/prompt-builder.ts` | Chip → prompt-string: whole-file chips become a plain path list (NOT `@`-reads — those force a full read and fail on binaries; grok decides how to consume each path), **split by origin** — files the user explicitly attached under **"Attached file(s):"** (strong intent) vs the auto-included active-editor file under **"Currently open in the editor (for context):"** (ambient, via `isImplicitChip`); selected-range chips become fenced code blocks. The file-path context is wrapped in a machine-readable `<vscode-context>` envelope (`CONTEXT_TAG_OPEN`/`CLOSE`) so the webview can parse it back deterministically on restore (`parseAttachmentContext`) and re-render filename-only chips instead of the raw replayed paths |
 | `src/slash-filter.ts` | Slash-command autocomplete filter |
@@ -35,7 +35,7 @@ This file is the project map: it describes the **current** architecture, not a p
 | `src/file-ref.ts` | Open-file `path#L<n>` ref parsing + large-file inline-read guard (pure) |
 | `src/plan-review.ts` | Plan-snapshot Markdown filename generation for the "open plan as editor tab" action (pure) |
 | `src/mode-prefs.ts` | Remembered-mode policy (pure, #25) — `modeToRemember` (persist Agent/Auto-accept, never Plan) + `startsInYolo` (new-session-only application) |
-| `src/telemetry.ts` | Anonymous Aptabase telemetry — pure builders (`aptabaseHost`/`osNameFromPlatform`/`shouldSendTelemetry`/`buildSessionStartEvent`) + a fire-and-forget `postEvent`. One `session_start` per session on the first real user message; no SDK |
+| `src/telemetry.ts` | Upstream Aptabase payload/build helpers retained for compatibility/tests; this fork disables the production POST in `sidebar.ts` |
 | `src/voice.ts` | Voice-input pure helpers — STT request/response/error, per-platform ffmpeg args, DirectShow device parsing, API-key resolution |
 | `src/voice-recorder.ts` | Batch capture: `VoiceRecorder` (spawns `ffmpeg` → WAV, graceful `q`-stop) + `transcribeAudio` (POST to `api.x.ai/v1/stt`) + `resolveWindowsAudioDevice` |
 | `src/voice-streamer.ts` | Live capture: `VoiceStreamer` (ffmpeg PCM → `ws` → `wss://api.x.ai/v1/stt`, emits partial/final transcript events) |
@@ -71,7 +71,7 @@ The history popover loads sessions **one page at a time** (`SESSION_PAGE_SIZE = 
 
 ```bash
 npm install
-npm test         # 856 tests, ~1.5s, vitest — all grok-free (incl. happy-dom DOM tests + fake-CLI ACP integration tests)
+npm test         # 1009 passing + 5 platform-skipped tests, vitest — all grok-free
 npm run test:perf # opt-in session-history perf simulation (NOT in npm test/CI; see § History pagination)
 npm run package  # → grok-coder-<version>.vsix (clears older *.vsix first)
 ```
@@ -80,9 +80,9 @@ npm run package  # → grok-coder-<version>.vsix (clears older *.vsix first)
 
 There are **three** kinds of tests, and it matters which is which:
 
-1. **`npm test` — grok-free unit/DOM/integration suite (856 tests).** Pure logic, happy-dom tests that drive the real `media/chat.js`, a real-`/bin/sh` TerminalManager smoke, and a fake-CLI ACP integration suite (`test/fixtures/fake-grok-acp.cjs`). **Never spawns the real `grok` binary.** Runs in <2s with no network, no login, no subscription. This is the floor — every change keeps it green. (A separate opt-in `npm run test:perf` runs the session-history perf simulation — `test/*.perf.ts` via `vitest.perf.config.ts`, matched only by that config so it stays out of `npm test`/CI; see § History pagination.)
+1. **`npm test` — grok-free unit/DOM/integration suite (1009 passing, 5 platform-skipped on macOS).** Pure logic, happy-dom tests that drive the real `media/chat.js`, TerminalManager shell tests, and a fake-CLI ACP integration suite (`test/fixtures/fake-grok-acp.cjs`). **Never spawns the real `grok` binary.** Runs in a few seconds with no network, login, or subscription. This is the floor — every change keeps it green. (A separate opt-in `npm run test:perf` runs the session-history perf simulation — `test/*.perf.ts` via `vitest.perf.config.ts`, matched only by that config so it stays out of `npm test`/CI; see § History pagination.)
 2. **CI — unit suite + package + Extension Host smoke.** `.github/workflows/ci.yml` runs `npm ci && npm test && npm run package` plus `xvfb-run npm run test:integration` (`@vscode/test-electron`, missing-CLI path — no real grok).
-3. **`npm run test:live` — on-demand pre-release suite against REAL grok (`scripts/live-tests.cjs`).** Spawns the actual `grok agent stdio` and exercises the surfaces layers 1–2 can't: the real ACP handshake, a prompt round-trip, session restore, plan-mode enforcement, the v1.4.x generative features (image gen, video gen), and the real `spawn_subagent` delegation (§ ACP surfaces implemented) — that last one SKIPs only if grok doesn't choose to delegate on a given run. It **reuses the real compiled modules** (`out/acp-dispatch.js`, `out/plan-gate.js`, `media/webview-helpers.js`) — it feeds genuine wire output through the same `isMediaGenToolCall`/`extractGeneratedMediaPaths`/`isSubagentToolCall`/`shouldBlockWrite` the extension uses, not a re-implementation. **Always run it before every release-to-`main` — it's a non-negotiable, standing part of the release gate; run it without asking** (it needs a logged-in grok + subscription and burns credits, so it must never be in `npm test` or CI, but it is mandatory before any tag/release). Flags: `--quick` (skip the slow generative tests), `--only=`, `--skip=`, `GROK_BIN=…`. A SKIP (no subscription, grok chose not to delegate, etc.) does not fail the gate — only a FAIL does. Real-grok **diagnostic probes** (`research/*.cjs`) remain manual one-offs for capturing wire shapes; the live suite is the repeatable gate.
+3. **`npm run test:live` — on-demand pre-release suite against REAL grok (`scripts/live-tests.cjs`).** Spawns `grok agent stdio` and covers handshake/capabilities, prompts, cancel, concurrent sessions, restore, plan enforcement, media, compact notifications, live effort changes, and subagent delegation on grok-build and Composer. It reuses the shipped dispatch/gate/helper modules. **Always run it before every release-to-`main`**; the release scripts run it by default (`--skip-live`/`-SkipLive` opts out). A SKIP does not fail the gate — only a FAIL does.
 
 **So:** local == CI (both grok-free). The real-grok tests are a separate, mandatory pre-release gate — always run before a tag/release (no need to ask), never on every commit.
 
@@ -113,12 +113,12 @@ See `README.md § Install` for the full per-platform matrix.
 - `grok.chatFontScale` (#14, webview-only — **not** ACP) → chat-panel zoom as a percent (default 100, clamped 60–300). The host bakes the initial value into `<body style="zoom:…">` in `getHtml` (no flash) and `postFontScale` re-posts a `fontScale` message on `onDidChangeConfiguration` for a live, reload-free update (chat.js sets `document.body.style.zoom`). `zoom` scales the whole chat — text, icons, spacing — but not the rest of VS Code (the point vs. global `Ctrl/Cmd+Shift+=`). Supports User/Workspace scope for free. `chatFontScale()` in `sidebar.ts` reads + clamps. The **scroll-to-bottom button** (#28) lives inside `.composer` (`position:absolute`), so it rides this same zoom scale instead of fixed viewport pixels.
 - `grok.showThinking` (#26, webview-only — **not** ACP) → whether grok's reasoning traces are shown; **default false**. The host bakes a `thinking-hidden` body class into `getHtml` (no flash) + posts `showThinking` on init and on `onDidChangeConfiguration`; chat.js's `applyThinkingVisibility` toggles the class (`body.thinking-hidden .msg.thinking { display:none }` — works on replayed/old sessions, instant flip). When hidden, the pure-CSS `loading-dots` **"Thinking…"** stand-in (brain icon) shows while grok reasons. A **continuous-indicator guarantee** (`ensureActivityIndicator`/`turnHasVisibleActivity`, called after each `TURN_PROGRESS_MSGS` event) keeps **Grokking / a running tool / Thinking…** on screen for the whole live turn — never a dead frame (skips the locked priming window + replay). Toggle in gear → **Config & debug** (a `.popover-switch`).
 - `grok.defaultMode` (#25, webview-only — **not** ACP) → the remembered last non-plan mode (`"" | "agent" | "yolo"`), applied to **new** sessions only (resumed ones keep their verdict-driven plan/agent state). `setMode` persists it on every user switch except Plan (a transient per-task choice); the new-session path flips `autoApprove` when it's `"yolo"`. Mirrors how `defaultModel`/`defaultEffort` already persist.
-- **Telemetry** (`grok.telemetry.enabled`, default **true** — **not** ACP). One anonymous Aptabase `session_start` event per session, fired from the real-send path at `isFirstSend` (`!session.hasHistory`), so the primer (separate `client.prompt` path, never sets `hasHistory`) and empty/abandoned sessions never report. Props = an anonymous install GUID (`grok.installId` in globalState, survives updates) + `mode`/`model`/`effort`; **no content**. Double-gated via the pure `shouldSendTelemetry(vscode.env.isTelemetryEnabled, grok.telemetry.enabled)` — either off silences it. Region host comes from the app-key prefix (`aptabaseHost`); `postEvent` is fire-and-forget over `node:https`. Country is Aptabase-derived from IP server-side (IP then discarded). Pure helpers in `src/telemetry.ts`; no SDK dependency. **Two Aptabase projects:** the extension **always** reports to `APTABASE_APP_KEY_PROD` (dev host, local vsix installs, and the Marketplace build alike — `isDebug` flags the dev host); the `APTABASE_APP_KEY_DEV` project receives **only** the manual `npm run telemetry:probe` (`scripts/telemetry-probe.cjs`), which fires real `session_start`s through the *compiled* `out/telemetry.js` so test traffic never pollutes prod. The `npm test` unit suite stays network-free — it asserts the payload/builders, never POSTs.
+- **Telemetry:** upstream payload/build helpers and `grok.telemetry.enabled` remain for compatibility, but this fork deliberately disconnects the production Aptabase POST in `reportSessionStart`; no background telemetry is sent. Tests cover the pure helpers without network access.
 - `available_commands_update` → slash autocomplete
 - `current_mode_update` → bottom-toolbar mode button (the top bar was removed in 0.9.0)
 - `_meta.totalTokens` → context donut
 - **Generated media (v1.4.x).** `/imagine` (`image_gen`, or `image_edit` for reference-photo edits) and `/imagine-video` (`video_gen`; older/Linux builds `image_to_video`) are subscription-only and do **not** return ACP image blocks — grok writes the file into its session dir (`images/*.jpg`, `videos/*.mp4`) and reports the path as a JSON string in the completed tool result's `text` content. The pure `isMediaGenToolCall`/`extractGeneratedMediaPaths` (in `acp-dispatch.ts`) detect the tool and parse the path (image-vs-video by extension); `acp.ts` tracks the tool-call id (the *completed* update has a null title) and emits `mediaContent`; `sidebar.ts` `postGeneratedMedia` serves the file via `webview.asWebviewUri` (streamed from disk under the grok-home `localResourceRoot` — what made multi-MB `/imagine-video` clips render; a base64 `data:` URI is only the fallback for files outside the served roots). CSP grants `img-src`/`media-src ${webview.cspSource} data:`. Inline media is capped at 320px with Copy-path / Open-in-VS-Code hover actions pinned to the image. On resume grok replays it as a single collapsed `tool_call` carrying title + path together, so the same path fires. Wire format + probes in `research/image-generation.md` (`research/imagine-probe.cjs`, `research/video-probe.cjs`).
-- **Subagent delegation (v1.5.6, grok 0.2.93+).** A `spawn_subagent` tool call (`rawInput: { prompt, description, subagent_type, background }`) renders as a distinct purple-accented row — task description + blink-dots while running, duration + expandable result on completion. `isSubagentToolCall`/`subagentLabel` (in `webview-helpers.js`) classify the call; completion arrives as either the tool call's own `tool_call_update` or a `subagent_finished` lifecycle event (`client.on("subagentLifecycle", …)` → `subagentUpdate`, wired for forward-compat since 0.2.93 logs the event but doesn't yet transmit it over ACP); `rawOutput.SubagentCompleted` carries output + stats. The child's own persisted sibling session (`session_kind: "subagent"`) is grok's internal working state, not a user chat, so `postSessionsList` filters it out of history. The legacy 0.2.3–0.2.3x mechanism (a backgrounded `run_terminal_command` polled via `get_command_or_subagent_output`) is kept as a fallback match; the poller stays explicitly excluded from carding. **Nested inspector still TODO** — today's card is a flat marker, not a tree of the child's own tool calls. Wire shapes + history in `research/subagents.md`.
+- **Subagent delegation (grok 0.2.101+).** `spawn_subagent`/Composer `Task` calls render a dedicated row. Live `subagent_spawned`/`subagent_finished` updates arrive on `_x.ai/session_notification` and fill duration, output, and failed/cancelled state; tool-channel completion remains a backstop. Restores recover flattened background-task results, child sessions stay hidden from history, and the legacy background-shell/poller path remains supported. **Nested inspector still TODO.** Wire shapes + history in `research/subagents.md`.
 - **Logout (v1.4.0, #13).** `grok.logout` command + gear-menu *Sign out* → `sidebar.logout()` runs `grok logout`, disposes the session, shows the auth-required onboarding.
 
 ## Known limits
@@ -130,17 +130,15 @@ See `README.md § Install` for the full per-platform matrix.
 
 ## Cross-platform notes
 
-- `terminal-manager.ts` uses `spawn(cmd, { shell: true })` so Node picks `cmd.exe` on Windows, `/bin/sh` elsewhere. Don't hardcode shell paths.
+- `terminal-manager.ts` uses PowerShell on Windows (`pwsh`, then Windows PowerShell 5.1) unless `grok.terminalShell=cmd`; macOS/Linux use `/bin/sh`. Don't hardcode shell paths.
 - `cli-locator.ts` reads `HOME` / `USERPROFILE` env vars first (testability), falls back to `os.homedir()`. Uses `where` on Windows, `command -v` elsewhere. Checks `.cmd`/`.exe`/`.bat` extensions on Windows.
 - Tests use `node -e "..."` everywhere, so commands are deterministic across platforms — don't add `pwd`, `awk`, `sleep`, `true`, etc.
 
 ## What's next (priority order)
 
-1. `@vscode/test-electron` integration suite (scoped in `TESTS.md § v0.2`)
-2. Status-bar indicator (current model + effort + token usage)
-3. Subagent nested inspector — group each child's own tool calls under its parent card (today's card is a flat marker; see § ACP surfaces implemented)
-4. Worktree UI (`Grok: New Worktree Session`)
-5. Optional: auto-move view to secondary side bar on first activation (`workbench.action.moveView`)
+1. Subagent nested inspector — group each child's own tool calls under its parent card
+2. Worktree UI (`Grok: New Worktree Session`)
+3. Optional: auto-move view to secondary side bar on first activation (`workbench.action.moveView`)
 
 ## Upstream sync (phuryn/grok-build-vscode)
 
@@ -150,9 +148,7 @@ grok-coder is a **detached fork** of [phuryn/grok-build-vscode](https://github.c
 - **Rebranded — always keep ours:** `package.json` identity, `README`/`CLAUDE.md` publish IDs, welcome byline, telemetry SDK name (`grok-coder`).
 - **Shared surface — real conflict risk:** the ACP side (`src/sidebar.ts`, `src/acp*.ts`, `src/session*.ts`, `src/plan*.ts`, …) and `media/chat.js`, where both sides edit.
 
-Upstream last synced to **v1.5.6** (`12d1ee1`) — the v1.5.1 wave is documented in [docs/upstream-sync-v1.5.1.md](docs/upstream-sync-v1.5.1.md); v1.5.2–v1.5.4 was a targeted send-queue sync (#37/#38), skipping v1.5.2's `view-move` (it re-homes the view to the Secondary Side Bar and raises the `engines` floor to VS Code 1.106 — incompatible with our activitybar-only placement, see § Known limits); v1.5.5–v1.5.6 brought Codex's refactor plus full `spawn_subagent` support (see § ACP surfaces implemented).
-
-**Not yet synced: v1.5.7 → v1.5.15.** Next highest-value item is the edit-diff inline rendering that landed in that range.
+Upstream last synced to **v1.6.1** (`2b1b89b`) — the v1.5.1 wave is documented in [docs/upstream-sync-v1.5.1.md](docs/upstream-sync-v1.5.1.md). The fork intentionally keeps activitybar-only placement (no `view-move`/VS Code 1.106 floor), its own branding/telemetry, and all `src/direct/` features.
 
 **Sync procedure:**
 
@@ -169,7 +165,7 @@ git diff <last-synced>..upstream/main -- src/ media/ scripts/ \
 
 - `<last-synced>` = the upstream SHA/tag we last pulled from; **first sync** has none, so use the upstream tag this fork was based on (≈ `v1.4.30`) as the base.
 - **Resolve brand conflicts by keeping ours** (publisher / name / URLs / byline / telemetry SDK).
-- **After every sync (non-negotiable):** `tsc -p . --noEmit` clean + `npm test` at the **856-test floor** + `npm run test:live` — the ACP wire format is what drifts with upstream, so live is the thing most likely to break.
+- **After every sync (non-negotiable):** `tsc -p . --noEmit` clean + `npm test` at the **1009-pass floor** + `npm run test:live` — the ACP wire format is what drifts with upstream, so live is the thing most likely to break.
 - **Record the synced-to upstream SHA** in the CHANGELOG entry so the next `git diff` has a base.
 
 ## Publishing
@@ -195,7 +191,7 @@ What the script encodes, step by step:
    - `package.json` itself — description, `engines`, `categories`, `contributes`.
 
    Keep `CHANGELOG.md` entries **terse** (1–3 bullets per release under Added/Changed/Fixed; deep detail belongs in commits / `research/`, not the changelog); releases before the current minor live in `docs/CHANGELOG-ARCHIVE.md` (linked from the foot of `CHANGELOG.md`).
-2. `npm test` (640-test floor, all green) + `tsc -p . --noEmit` clean, **and `npm run test:live` against real grok — mandatory, run without asking** (the `release.*` scripts don't run it, so run it by hand before invoking them).
+2. `npm test` (1009-pass floor) + `tsc -p . --noEmit` clean, **and `npm run test:live` against real grok**. The release scripts run all three by default; `--skip-live`/`-SkipLive` is the explicit weaker-gate escape hatch.
 3. Commit + push to `main` (direct-to-main, no feature branches).
 4. **Annotated git tag** `vX.Y.Z` at the release commit → `git tag -a vX.Y.Z -m "Release vX.Y.Z"` → `git push origin vX.Y.Z`.
 5. **GitHub Release** for that tag → `gh release create vX.Y.Z --title "Release vX.Y.Z" --notes-file <notes> <vsix>` (notes = the new changelog section(s); include any earlier version that was bumped but never released). **Always attach the built `grok-coder-X.Y.Z.vsix` as a release asset** so the exact installable build is downloadable from the release.
@@ -211,7 +207,7 @@ Don't skip the tag/release (or the vsix asset) on a release push. (A pure mid-de
 - Commits explain the *why*, not the *what*
 - Don't introduce abstractions speculatively
 - Don't add comments that explain what well-named code already says
-- 856 tests is the floor — every PR should keep that green. All tests are grok-free (no binary spawn); grok-dependent probes live in `research/*.cjs` and are run manually, never by `npm test` or CI
+- 1009 passing tests is the floor — every PR should keep that green. All `npm test` cases are grok-free; real-grok probes and `test:live` stay outside CI
 - **Rebuilding clears older `.vsix` first** — `npm run package` (and the install/release scripts) delete stale `grok-coder-*.vsix` before building, so only the current version is on disk. After any doc or code change, rebuild + reinstall so the installed extension's bundled docs are current. **Package last:** the vsix bundles `CLAUDE.md`/`README.md`/`docs/` as files, so finish *all* doc + code edits **before** the final `npm run package` + reinstall — otherwise the installed build ships a stale-docs snapshot. If you rebuild mid-task and then touch docs again, rebuild again so the order is always edit-everything → package → reinstall.
 - **Version bumps are user-initiated.** Iterate at the current version (rebuild the same vsix and reinstall locally) until the user says to bump and publish. Don't bump `package.json` on your own.
 - **Sign GitHub comments.** Every GitHub issue/PR comment posted on the user's behalf ends with an italic signature on its own final line — e.g. `_Written by an agent_`, or `_Written with an agent, reviewed by the maintainer_` when the maintainer actually reviewed the text first. Only claim review when it actually happened.

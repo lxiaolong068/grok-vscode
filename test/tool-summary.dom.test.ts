@@ -16,7 +16,9 @@ function groupLabel(doc: Document): string | null {
   return doc.querySelector(".tool-group .tool-group-label")?.textContent ?? null;
 }
 function flatLabel(doc: Document): string | null {
-  return doc.querySelector(".tool-flat")?.textContent ?? null;
+  // The label span only — a command's flat row also carries the #41 details
+  // block (full command text), which is not part of the label.
+  return doc.querySelector(".tool-flat .tool-label")?.textContent ?? null;
 }
 
 describe("tool-call rollup categorization (live, kind present)", () => {
@@ -57,11 +59,18 @@ describe("tool-call labels (single-call flat line)", () => {
     expect(flatLabel(doc)).toBe("Search image_edit|/imagine");
   });
 
-  it("a command shows 'Run <cmd>'", () => {
+  it("a command shows 'Run <program>' (flags/payload dropped — full text is in the IN/OUT detail)", () => {
     const { window, doc } = bootWebview();
     dispatch(window, tc({ toolCallId: "1", kind: "execute", title: "Execute `ls`", rawInput: { command: "ls -la /tmp" } }));
     close(window);
-    expect(flatLabel(doc)).toBe("Run ls -la /tmp");
+    expect(flatLabel(doc)).toBe("Run ls"); // -la is a flag → dropped
+  });
+
+  it("a command keeps a non-flag subcommand: 'Run git status'", () => {
+    const { window, doc } = bootWebview();
+    dispatch(window, tc({ toolCallId: "1", kind: "execute", title: "Execute", rawInput: { command: "git status --short" } }));
+    close(window);
+    expect(flatLabel(doc)).toBe("Run git status");
   });
 
   it("a tool we didn't predict still renders, using grok's own title", () => {

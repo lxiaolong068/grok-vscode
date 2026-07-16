@@ -2,7 +2,24 @@
 
 ## Unreleased (upstream sync)
 
-Synced shared ACP/sidebar surface from upstream **phuryn/grok-build-vscode**, via path-filtered patch (detached fork — no merge). Synced through **v1.5.4** (`cffa93a`); v1.5.1 wave documented in [docs/upstream-sync-v1.5.1.md](docs/upstream-sync-v1.5.1.md).
+Synced shared ACP/sidebar surface from upstream **phuryn/grok-build-vscode**, via path-filtered patch (detached fork — no merge). Synced through **v1.6.1** (`2b1b89b`); v1.5.1 wave documented in [docs/upstream-sync-v1.5.1.md](docs/upstream-sync-v1.5.1.md).
+
+### Added (from upstream 1.5.7–1.6.1)
+
+- Expandable command IN/OUT details, inline edit diffs with real line numbers, expand/collapse-all commands, RTL chat rendering, and composer focus after adding context.
+- Live `_x.ai/session_notification` handling for automatic compaction and subagent lifecycle events; restored subagents now recover duration, output, and failure/cancel state.
+- Voice input can reuse a valid `grok login` token; Windows command execution supports PowerShell with a `grok.terminalShell` fallback setting.
+
+### Changed (from upstream 1.6.1)
+
+- Reasoning effort can apply live on grok 0.2.101+ when the current model advertises support.
+- Manual and automatic compaction refresh the context donut from live `tokens_after`, with the existing hidden `/session-info` fallback for older CLIs.
+
+### Fixed (from upstream 1.5.7–1.6.1)
+
+- Expired login tokens trigger a one-time transparent session restart and resend instead of immediately forcing sign-out.
+- Failed commands and tools surface their error state on collapsed rows/groups; command labels handle subshell and quoted-argument shapes.
+- Inline diff corrections, replace-all hunks, line-number gutters, and restored background-subagent results now render accurately.
 
 ### Fixed (from upstream 1.5.5)
 

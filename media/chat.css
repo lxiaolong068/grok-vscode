@@ -20,8 +20,11 @@
      an alpha multiplier, so this is a ~66%-opaque wash of mostly list-hover
      with a hint of foreground. Don't "normalize" the sum to 100%. */
   --chat-surface-code: color-mix(in srgb, var(--vscode-list-hoverBackground) 60%, var(--vscode-foreground) 6%);
-  --chat-radius-message: 16px;
-  --chat-radius-code: 10px;
+  /* Radius scale (largest container → smallest nested surface): user bubble
+     12 → block code / IN-OUT command block 8 → inline code chip 6. Keeps
+     nested corners visually concentric and matches the 8px icon buttons. */
+  --chat-radius-message: 12px;
+  --chat-radius-code: 8px;
 }
 
 * { box-sizing: border-box; }
@@ -609,6 +612,7 @@ body.thinking-hidden .msg.thinking { display: none; }
 
 .tool-flat {
   display: flex;
+  flex-wrap: wrap; /* the #41 details block breaks onto its own full-width row */
   align-items: flex-start;
   gap: 7px;
   font-size: var(--vscode-font-size);
@@ -616,6 +620,7 @@ body.thinking-hidden .msg.thinking { display: none; }
   padding: 3px 0;
   font-family: var(--vscode-font-family);
 }
+.tool-flat.has-details { cursor: pointer; }
 
 /* Generated media (grok /imagine image, /imagine-video video) */
 .generated-image {
@@ -682,6 +687,21 @@ body.thinking-hidden .msg.thinking { display: none; }
   background: var(--vscode-textBlockQuote-background, rgba(177, 128, 215, 0.08));
   border-radius: 0 6px 6px 0;
 }
+/* A failed subagent reads as failed at a glance — red left border + red
+   label/marker — matching how a failed tool call (.tool-failed) signals. */
+.subagent-card.subagent-failed {
+  border-left-color: var(--vscode-errorForeground);
+}
+.subagent-card.subagent-failed .subagent-label,
+.subagent-card.subagent-failed .subagent-badge,
+.subagent-card.subagent-failed .subagent-time {
+  color: var(--vscode-errorForeground);
+}
+/* A cancelled subagent was a user stop, not a failure — reads muted, not red
+   (mirrors the command path's grey [Cancelled] marker). */
+.subagent-card.subagent-cancelled .subagent-time {
+  opacity: 0.7;
+}
 .subagent-card .subagent-row {
   display: flex;
   align-items: center;
@@ -744,11 +764,19 @@ body.thinking-hidden .msg.thinking { display: none; }
   transition: opacity 0.12s, transform 0.12s;
 }
 .tool-group-header:hover .tool-chevron { opacity: 0.8; }
-.tool-group.expanded .tool-chevron {
+/* Header-scoped (> .tool-group-header) on purpose: the body's command ROWS
+   carry their own chevrons whose state must not inherit from the group —
+   an unscoped selector rotated every row chevron to v whenever the group
+   was expanded, and hid them all while the group ran (#41 follow-up). */
+.tool-group.expanded > .tool-group-header .tool-chevron {
   opacity: 0.8;
   transform: rotate(90deg);
 }
-.tool-group.in-progress .tool-chevron { display: none; } /* can't expand while running */
+.tool-group.in-progress > .tool-group-header .tool-chevron { display: none; } /* can't expand while running */
+/* …except a lone running COMMAND, which is expandable immediately (#41), or a
+   group the Expand-All latch forced open mid-run (so it can be collapsed). */
+.tool-group.in-progress.cmd-single > .tool-group-header .tool-chevron,
+.tool-group.in-progress.expanded > .tool-group-header .tool-chevron { display: inline-flex; }
 /* A running group stays muted like the Grokking / Thinking indicators — the
    blinking dots convey activity, not a brighter text color. */
 .tool-group-label { color: inherit; }
@@ -784,6 +812,177 @@ body.thinking-hidden .msg.thinking { display: none; }
   font-size: var(--vscode-font-size);
   color: var(--vscode-descriptionForeground);
 }
+/* #41: per-command expandable detail — Claude-Code-style IN/OUT block on the
+   shared code-chip surface. Every tool call stays one ellipsized line;
+   clickable command rows carry a trailing chevron (› collapsed, v expanded)
+   plus hover brightening — plain rows like get_command_or_subagent_output
+   don't react. */
+.tool-item.has-details, .tool-flat.has-details { cursor: pointer; user-select: none; }
+.tool-item.has-details:hover, .tool-flat.has-details:hover { color: var(--vscode-foreground); }
+.tool-item.has-details:hover .tool-chevron, .tool-flat.has-details:hover .tool-chevron { opacity: 0.8; }
+.tool-item.expanded .tool-chevron, .tool-flat.expanded .tool-chevron {
+  opacity: 0.8;
+  transform: rotate(90deg);
+}
+/* Single-line labels: truncate instead of wrapping (long grep patterns,
+   commands); the details block still breaks onto its own full-width row. */
+.tool-item-label, .tool-flat .tool-label {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tool-item-details {
+  flex-basis: 100%;
+  min-width: 0;
+  margin: 3px 0 6px;
+  cursor: default;      /* the block is content, not a toggle target */
+  user-select: text;    /* output must be selectable without collapsing */
+}
+.cmd-block {
+  background: var(--chat-surface-code);
+  border-radius: var(--chat-radius-code, 10px);
+  padding: 6px 10px;
+  font-size: 0.92em;
+  line-height: 1.45;
+}
+.cmd-io {
+  display: grid;
+  grid-template-columns: 30px 1fr;
+  gap: 0 8px;
+}
+.cmd-io + .cmd-io {
+  border-top: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+  margin-top: 6px;
+  padding-top: 6px;
+}
+.cmd-io-tag {
+  color: var(--vscode-descriptionForeground);
+  opacity: 0.75;
+  font-size: 0.85em;
+  padding-top: 2px;
+  user-select: none;
+}
+.cmd-io pre {
+  margin: 0;
+  padding: 0;
+  background: none;
+  border-radius: 0;
+  font-size: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* Long commands and outputs scroll inside the block instead of growing it. */
+.tool-cmd {
+  max-height: 140px;
+  overflow-y: auto;
+  color: var(--vscode-editor-foreground, var(--vscode-foreground));
+}
+.tool-cmd-output {
+  max-height: 260px;
+  overflow-y: auto;
+  color: var(--vscode-foreground);
+}
+.cmd-out-marker {
+  font-size: 0.88em;
+  color: var(--vscode-errorForeground);
+  margin-bottom: 3px;
+}
+.cmd-out-marker.muted { color: var(--vscode-descriptionForeground); }
+/* exit-0-with-no-output: a muted done marker (a green tick, description-colored
+   text) instead of an empty "(no output)" pre. */
+.cmd-out-marker.ok { color: var(--vscode-descriptionForeground); }
+.cmd-out-marker.ok::first-letter { color: var(--vscode-charts-green, #4ec9b0); }
+.cmd-out.failed .cmd-io-tag,
+.cmd-out.failed .tool-cmd-output { color: var(--vscode-errorForeground); }
+
+/* Inline edit-diff palette — Codex's exact green/red (they read well in both
+   themes and match the Codex panel a lot of users run side-by-side). Dark is the
+   default; light overrides on the VS Code body class. bg = translucent tint,
+   line = the solid stroke used for the left border + the +/- glyph + the stat. */
+:root {
+  --tdiff-add-bg: #40c9773b;
+  --tdiff-del-bg: #fa423e3b;
+  --tdiff-add-line: #40c977;
+  --tdiff-del-line: #fa423e;
+}
+body.vscode-light {
+  --tdiff-add-bg: #00a24026;
+  --tdiff-del-bg: #ba262326;
+  --tdiff-add-line: #00a240;
+  --tdiff-del-line: #ba2623;
+}
+/* Edit rows: the always-visible "+A −R" change count (green adds, red removes),
+   shown inline after the label AND rolled up onto a collapsed group header, so an
+   edit is auditable at a glance without expanding (#45). */
+.diff-stat { white-space: nowrap; }
+.diff-stat-add { color: var(--tdiff-add-line); }
+.diff-stat-del { color: var(--tdiff-del-line); }
+
+/* Codex-style inline diff inside the edit row's expandable detail: a line-number
+   gutter, a colored left-border stripe, a subtle per-line tint, and a small +/-
+   glyph by the border for color-blind readability. Rows scroll rather than growing
+   the row unbounded. */
+.tool-diff-region {
+  margin: 0 0 6px;
+  max-height: 320px;
+  overflow: auto;
+  border-radius: var(--chat-radius-code, 8px);
+  background: var(--chat-surface-code);
+  padding: 4px 0;
+  font-size: 0.92em;
+  line-height: 1.5;
+}
+.tdl {
+  display: grid;
+  /* sign | line# | code. The line# track sizes to the widest number in THIS region
+     (buildInlineDiffRegion sets --tdl-num-w = max(4ch, digits+1)): 4ch through 999
+     — digits >99 used to wrap under overflow-wrap:anywhere — and wider only for a
+     1000+ line file, which real file line numbers made reachable. */
+  grid-template-columns: 1.1ch var(--tdl-num-w, 4ch) 1fr;
+  gap: 0 8px;
+  padding-left: 7px;  /* breathing room between the colored border stripe and the +/- glyph */
+  padding-right: 10px;
+  border-left: 2px solid transparent;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--vscode-editor-foreground, var(--vscode-foreground));
+}
+.tdl-sign {
+  text-align: center;
+  user-select: none;
+  font-weight: 600;
+}
+.tdl-num {
+  text-align: right;
+  color: var(--vscode-editorLineNumber-foreground, var(--vscode-descriptionForeground));
+  opacity: 0.75;
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap; /* never wrap 3+ digit line numbers onto a second row */
+}
+.tdl-code { min-width: 0; }
+.tdl-add { background: var(--tdiff-add-bg); border-left-color: var(--tdiff-add-line); }
+.tdl-del { background: var(--tdiff-del-bg); border-left-color: var(--tdiff-del-line); }
+.tdl-add .tdl-sign { color: var(--tdiff-add-line); }
+.tdl-del .tdl-sign { color: var(--tdiff-del-line); }
+/* Hairline between two NON-CONTIGUOUS hunks of one edit — a replace_all's sites sit
+   at scattered file lines (3, 5, 7…), which would otherwise read as one run. The
+   gutter numbers say where we jumped to; this just breaks the eye's line. */
+.tdl-sep {
+  height: 0;
+  margin: 4px 0;
+  border-top: 1px dashed var(--vscode-panel-border, var(--vscode-editorLineNumber-foreground));
+  opacity: 0.6;
+}
+.tool-diff-more {
+  padding: 2px 10px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.92em;
+}
+.tool-item-diff .preview-link { display: inline-block; margin: 0 0 4px; }
+
 /* The line-count + "open diff" sit inline after the label on one row (they used
    to each take a full-width line via flex-basis:100%). A failure message
    (.tool-error) still keeps its own line. */
@@ -839,6 +1038,43 @@ body.thinking-hidden .msg.thinking { display: none; }
   color: var(--vscode-errorForeground);
 }
 
+/* ---- bidi / RTL content ---- */
+
+/* RTL support, half two (half one is applyAutoDir in chat.js): each loose
+   prose line takes its direction from its own first strong character, so an
+   Arabic paragraph right-aligns with its punctuation on the correct side
+   while the chat chrome (bubble sides, toolbar, tool rows) stays LTR.
+   plaintext must sit on the CONTAINERS because renderMarkdown emits
+   paragraph text bare (with <br> breaks), never inside <p>. The default
+   text-align:start follows each line's resolved direction under plaintext. */
+.msg .body,
+.thinking-body,
+.card .plan-body,
+.subagent-result,
+.queued-text {
+  unicode-bidi: plaintext;
+}
+/* The composer is dir="auto" (typed Arabic right-aligns live). The UA gives
+   textarea[dir=auto] plaintext already; stating it on both keeps the
+   send-phrase mirror (#input-highlight) laid out byte-identically to the
+   textarea it overlays — same per-line direction resolution. */
+#input,
+.input-highlight {
+  unicode-bidi: plaintext;
+}
+/* Code is code: always LTR, isolated so surrounding RTL prose can't reorder
+   it (Codex pins its markdown code blocks dir="ltr" the same way). Also
+   keeps file-ref links readable inside RTL sentences. */
+.code-block pre,
+.msg .body code,
+.card .plan-body code,
+.thinking-body code,
+.subagent-result code {
+  direction: ltr;
+  unicode-bidi: isolate;
+  text-align: left;
+}
+
 /* ---- markdown in agent messages ---- */
 
 .msg.agent .body { white-space: normal; line-height: 1.55; }
@@ -858,7 +1094,7 @@ body.thinking-hidden .msg.thinking { display: none; }
 .msg.agent .body ul,
 .msg.agent .body ol {
   margin: 6px 0;
-  padding-left: 22px;
+  padding-inline-start: 22px; /* logical: indents from the right for RTL lists */
 }
 .msg.agent .body ul { list-style-type: disc; }
 .msg.agent .body ol { list-style-type: decimal; }
@@ -940,23 +1176,20 @@ body.thinking-hidden .msg.thinking { display: none; }
 .code-copy-btn.copied { color: var(--vscode-charts-green, #4ec9b0); }
 .code-block.diff pre { padding: 8px 0; }
 .diff-code { display: block; }
+/* A ```diff fence in Grok's MESSAGE text (renderDiffCode) shares the same visual
+   language as an edit row's inline diff (buildInlineDiffRegion): the Codex palette
+   + a colored left-border stripe + subtle tint. No line-number gutter here — a raw
+   unified-diff fence carries no reliable per-line numbers (Grok's message diffs
+   have no @@ hunk headers) — but the +/- prefix stays as the color-blind glyph. */
 .diff-line {
   display: block;
-  padding: 0 10px;
+  padding: 0 10px 0 9px;
+  border-left: 2px solid transparent;
   white-space: pre-wrap;
   word-break: break-word;
 }
-/* Match VS Code's own diff editor: the *Line* backgrounds are the full-line,
-   more-saturated greens/reds; the *Text* variants are the fainter token-level
-   highlights used for inline word diffs. */
-.diff-line.diff-add {
-  background: var(--vscode-diffEditor-insertedLineBackground,
-    var(--vscode-diffEditor-insertedTextBackground, rgba(155, 185, 85, 0.2)));
-}
-.diff-line.diff-del {
-  background: var(--vscode-diffEditor-removedLineBackground,
-    var(--vscode-diffEditor-removedTextBackground, rgba(229, 83, 75, 0.2)));
-}
+.diff-line.diff-add { background: var(--tdiff-add-bg); border-left-color: var(--tdiff-add-line); }
+.diff-line.diff-del { background: var(--tdiff-del-bg); border-left-color: var(--tdiff-del-line); }
 .diff-line.diff-hunk { color: var(--vscode-textLink-foreground); }
 .diff-line.diff-meta { color: var(--vscode-descriptionForeground); }
 .msg.agent .body strong { font-weight: 600; }
@@ -974,7 +1207,7 @@ body.thinking-hidden .msg.thinking { display: none; }
 .msg.agent .body td {
   border: 1px solid var(--vscode-editorWidget-border);
   padding: 5px 8px;
-  text-align: left;
+  text-align: start; /* follows the cell's dir="auto" (RTL cells right-align) */
   vertical-align: top;
   line-height: 1.45;
   /* Never break inside a word (headers looked cramped/narrow when long words
@@ -1869,7 +2102,7 @@ body.dragging { outline: 2px dashed var(--vscode-focusBorder); outline-offset: -
 .card .plan-body > :last-child { margin-bottom: 0; }
 .card .plan-body p { margin: 4px 0; }
 .card .plan-body ul,
-.card .plan-body ol { margin: 4px 0; padding-left: 20px; }
+.card .plan-body ol { margin: 4px 0; padding-inline-start: 20px; }
 .card .plan-body li { margin: 2px 0; }
 .card .plan-body h1,
 .card .plan-body h2,

@@ -1,12 +1,65 @@
 # Subagents over ACP
 
-> **Status: research-only / deferred.** The card code exists and is unit-tested
-> (`isSubagentToolCall`/`subagentLabel` in `webview-helpers.js`, `addSubagentCard`
-> in `chat.js`, the live-suite guard), but grok 0.2.x does **not** emit a
-> `spawn_subagent` ACP tool — it backgrounds a process and reads it via
-> `get_command_or_subagent_output` — so the card rarely fires. It was dropped from
-> the README/UI as a shipped feature in v1.4.3; treat this doc as the investigation
-> log, not a description of a live surface.
+> **v1.6.1 update (grok 0.2.101):** the `subagent_spawned`/`subagent_finished`
+> lifecycle events DO transmit live — on the **`_x.ai/session_notification`** rail
+> (NOT the `_x.ai/session/update` persist/replay rail the 0.2.93 measurement
+> watched, which is why it saw "never transmitted"). The extension now CONSUMES
+> them (`isSubagentLifecycleUpdate` re-routes to the webview's `subagentUpdate`)
+> for real `duration_ms` + output, **including the Composer agent**. Any "only
+> logs / never transmitted over ACP" note below is superseded — see
+> `research/grok-build-oss-findings.md` § discovery-2.
+
+> **Status: SHIPPED (subagent row) as of grok 0.2.93 / extension post-1.5.5.**
+> grok now emits a **genuine `spawn_subagent` tool call** — see § Ground truth
+> (0.2.93) below for the captured wire shapes. The extension renders a
+> purple-accented row (task description + blink-dots → duration + expandable
+> result) and hides the child's persisted sibling session from history
+> (`session_kind: "subagent"`). The sections after § Ground truth (0.2.93)
+> describe the OLD 0.2.3–0.2.3x background-shell mechanism and are kept as
+> history — the classifier still excludes the legacy
+> `get_command_or_subagent_output` poller as defense.
+
+## Ground truth (0.2.93) — genuine spawn_subagent
+
+Captured from the live-suite `subagent` test's persisted parent session
+(`updates.jsonl`, 2026-07-11; temp cwd `grok-live-sub-*`). One `toolCallId`
+carries the whole delegation:
+
+1. `tool_call` — title `"spawn_subagent"`, `rawInput: { prompt, description,
+   subagent_type: "general-purpose", background: false }`, `_meta["x.ai/tool"]
+   = { name: "spawn_subagent", kind: "task", label: "Subagent" }`.
+2. `subagent_spawned` — recorded in `updates.jsonl` under method
+   **`_x.ai/session/update`**: `{ subagent_id, parent_session_id,
+   child_session_id, subagent_type, effective_context_source, model }`.
+   **CAUTION: `updates.jsonl` is grok's event LOG, not the wire** — on 0.2.93
+   these lifecycle events are logged but **never transmitted to the ACP
+   client** (live-verified by the `subagent-composer` live test: zero
+   `_x.ai/session/update` messages arrive while the log fills). The extension
+   routes them anyway (`subagentLifecycle` → `subagentUpdate`) for the day the
+   CLI starts sending them.
+3. `subagent_finished` — same method/status: `{ subagent_id, status:
+   "completed", tool_calls, turns, duration_ms, tokens_used, output }`. For a
+   **background** spawn (`background: true`) the spawn call "completes"
+   immediately with a started-ack text; the real output reaches the client on
+   the `get_command_or_subagent_output` poller's completed update
+   (`rawOutput {type:"TaskOutput", Result:{task_id, duration_secs, output}}`),
+   which the extension matches back to the card by task id.
+4. `tool_call_update` — re-titles the call to the human task description
+   (`rawInput.variant: "Task"`).
+5. `tool_call_update` completed — the result THREE ways: text content with
+   embedded `<subagent_meta>`/`<subagent_result>` tags, structured
+   `rawOutput: { type: "SubagentCompleted", output, subagent_id, subagent_type,
+   tool_calls, turns, duration_ms, worktree_path, resume_from_hint }`, and the
+   `subagent_finished.output` above.
+
+**Child activity is never streamed on the parent connection.** The child is
+persisted twice: as a **top-level sibling session** under the same cwd folder
+(`summary.json` carries `session_kind: "subagent"`, `agent_name: <type>` — this
+is what the history filter keys on) and as `<parent>/subagents/<child-id>/meta.json`
+(compact stats record). A nested inspector would read the child session from
+disk (or `session/load` it via `resume_from_hint`); the live stream can't
+provide it. `spawn_subagent` goes through the normal `session/request_permission`
+flow, so in Agent mode the user first approves it like any other tool.
 
 Bundled-docs theory confirmed against **grok 0.2.33** (CLI docs at
 `~/.grok/docs/user-guide/16-subagents.md`, cross-checked with `grok --help`:

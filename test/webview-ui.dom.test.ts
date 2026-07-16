@@ -601,6 +601,28 @@ describe("Grokking… indicator (waiting placeholder)", () => {
     expect(doc.querySelector(".tool-group")).not.toBeNull();
   });
 
+  it("autoCompactNotice finalizes the active agent bubble so later tokens can't render above it", () => {
+    const { window, doc } = bootWebview();
+    dispatch(window, { type: "agentStart" });
+    dispatch(window, { type: "messageChunk", text: "Before compaction." });
+    dispatch(window, { type: "autoCompactNotice", text: "Auto-compacting context (94% full)…" });
+    dispatch(window, { type: "messageChunk", text: "After compaction." });
+    dispatch(window, { type: "promptComplete", meta: { totalTokens: 5 } }); // flush the buffered bubble
+    const notice = doc.querySelector(".plan-notice");
+    expect(notice).not.toBeNull();
+    expect(notice!.textContent).toContain("Auto-compacting context");
+    // Two distinct agent bubbles — the notice finalized the first, so "after"
+    // starts a fresh bubble instead of reusing (and reordering above) the first.
+    const bubbles = [...doc.querySelectorAll(".msg.agent")] as any[];
+    expect(bubbles.length).toBe(2);
+    expect(bubbles[0].textContent).toContain("Before compaction");
+    expect(bubbles[1].textContent).toContain("After compaction");
+    // DOM order is bubble0 → notice → bubble1 (the answer never floats above it).
+    const nodes = [...doc.querySelectorAll(".msg.agent, .plan-notice")] as any[];
+    expect(nodes.indexOf(bubbles[0])).toBeLessThan(nodes.indexOf(notice));
+    expect(nodes.indexOf(notice)).toBeLessThan(nodes.indexOf(bubbles[1]));
+  });
+
   it("shows on every turn, not just the first (a general typing indicator)", () => {
     const { window, doc } = bootWebview();
     // Turn 1 completes.
@@ -1404,6 +1426,50 @@ describe("active-editor context chip in the composer", () => {
     const chip = doc.querySelector("#chips .chip") as HTMLElement;
     expect(chip.querySelector("span")!.textContent).toBe("<img src=x>.ts");
     expect(chip.querySelector("img")).toBeNull();
+  });
+});
+
+// A selection sent via the "Add Selection to Grok" command is an EXPLICIT
+// attachment (id "explicit:…"), so it belongs in the top attachments row like
+// any other attached file — removable, with its line range on the label. Only
+// the ambient active-editor chip (implicit) stays in the bottom toolbar.
+describe("explicit selection chip placement (top attachments row)", () => {
+  const explicitSel = {
+    id: "explicit:/repo/src/a.ts:8-12:1",
+    path: "/repo/src/a.ts",
+    relPath: "src/a.ts",
+    selectionStart: 8,
+    selectionEnd: 12,
+    hidden: false,
+  };
+
+  it("renders a command-sent selection in the top row with its range + a remove button", () => {
+    const { window, posted, doc } = bootWebview();
+    dispatch(window, { type: "chips", chips: [explicitSel] });
+
+    // Top attachments area, NOT the bottom toolbar.
+    expect(doc.querySelector("#chips .chip")).toBeNull();
+    const row = doc.querySelector("#attachments .attachment") as HTMLElement;
+    expect(row).not.toBeNull();
+    expect(row.querySelector("span")!.textContent).toBe("a.ts:8-12"); // range survives the move to the top
+    expect(row.title).toBe("/repo/src/a.ts (lines 8-12)");
+
+    // Removable like any other attachment (not a hide toggle).
+    const rm = row.querySelector(".attachment-remove") as HTMLElement;
+    expect(rm).not.toBeNull();
+    click(window, rm);
+    expect(posted.find((m) => m.type === "removeChip" && m.id === explicitSel.id)).toBeTruthy();
+  });
+
+  it("keeps the ambient active-editor selection in the bottom toolbar", () => {
+    const { window, doc } = bootWebview();
+    dispatch(window, {
+      type: "chips",
+      chips: [{ ...explicitSel, id: "implicit:/repo/src/a.ts" }],
+    });
+    expect(doc.querySelector("#attachments .attachment")).toBeNull();
+    const chip = doc.querySelector("#chips .chip") as HTMLElement;
+    expect(chip.querySelector("span")!.textContent).toBe("a.ts:8-12");
   });
 });
 
